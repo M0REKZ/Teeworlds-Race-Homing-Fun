@@ -1,0 +1,1659 @@
+diff -ru teeworlds-0.4.2-src/src/engine/e_if_server.h ubuntu/src/engine/e_if_server.h
+--- teeworlds-0.4.2-src/src/engine/e_if_server.h	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/engine/e_if_server.h	2008-05-20 22:30:25.000000000 +0200
+@@ -106,7 +106,7 @@
+ 		<other_func>
+ */
+ void server_kick(int client_id, const char *reason);
+-
++void server_ban(int client_id, int time);
+ /*
+ 	Function: server_tick
+ 		TODO
+Seulement dans ubuntu/src/engine: e_network.c~
+diff -ru teeworlds-0.4.2-src/src/engine/server/es_server.c ubuntu/src/engine/server/es_server.c
+--- teeworlds-0.4.2-src/src/engine/server/es_server.c	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/engine/server/es_server.c	2008-05-21 22:00:31.000000000 +0200
+@@ -1,4 +1,4 @@
+-/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
++char version[64];/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+@@ -38,6 +38,9 @@
+ static int current_map_crc;
+ static unsigned char *current_map_data = 0;
+ static int current_map_size = 0;
++int *banlist;
++int *bantime;
++int bans=0;
+ 
+ void *snap_new_item(int type, int id, int size)
+ {
+@@ -265,6 +268,30 @@
+ 		netserver_drop(net, client_id, reason);
+ }
+ 
++void server_ban(int client_id, int time) {
++        NETADDR4 addr;
++        int clientip;
++	char reason[256];
++	if (clients[client_id].authed != 1)
++	{        
++		netserver_client_addr(net, client_id, &addr);
++
++		clientip=(addr.ip[0]<<24)+(addr.ip[1]<<16)+(addr.ip[2]<<8)+addr.ip[3];
++		dbg_msg("server", "the ip %d.%d.%d.%d is now banned",addr.ip[0],addr.ip[1],addr.ip[2],addr.ip[3]);
++
++		bans++;
++		if (bans==1) {banlist=malloc(sizeof(long));bantime=malloc(sizeof(long));}
++		else {banlist=realloc(banlist,sizeof(long)*bans);bantime=realloc(bantime,sizeof(long)*bans);}
++		banlist[bans-1]=clientip;
++		if(time > 0)bantime[bans-1]=server_tick()+server_tickspeed()*time *60;
++		else bantime[bans-1]=0;
++
++		if(time > 0)str_format(reason, sizeof(reason), "Banned by console for %d minutes",time);
++		else str_format(reason, sizeof(reason), "Banned by console permanently.");
++		server_kick(client_id, reason);
++	}
++}
++
+ int server_tick()
+ {
+ 	return current_tick;
+@@ -602,15 +629,21 @@
+ 	int cid = packet->client_id;
+ 	int sys;
+ 	int msg = msg_unpack_start(packet->data, packet->data_size, &sys);
++	int i;
++	int clientip;
++	NETADDR4 addr;
++	
+ 	if(sys)
+ 	{
+ 		/* system message */
+ 		if(msg == NETMSG_INFO)
+ 		{
+ 			char version[64];
++			char official[64];
+ 			const char *password;
+ 			str_copy(version, msg_unpack_string(), 64);
+-			if(strcmp(version, mods_net_version()) != 0)
++			str_format(official, sizeof(official), "0.4 1bd7780b0f76307c");
++			if(strcmp(version, mods_net_version()) != 0 && strcmp(version, official) != 0)
+ 			{
+ 				/* OH FUCK! wrong version, drop him */
+ 				char reason[256];
+@@ -629,7 +662,21 @@
+ 				netserver_drop(net, cid, "wrong password");
+ 				return;
+ 			}
+-			
++			if(cid >= (config.sv_max_clients-config.sv_reserved_slots) && config.sv_reserved_slots_pass[0] != 0 && strcmp(config.sv_reserved_slots_pass, password) != 0)
++			{
++				/* wrong password */
++				netserver_drop(net, cid, "Dropped due reserved slot");
++				return;
++			}	
++
++			netserver_client_addr(net, cid, &addr);
++			clientip=(addr.ip[0]<<24)+(addr.ip[1]<<16)+(addr.ip[2]<<8)+addr.ip[3];
++			for (i=0; i<bans; i++) {
++                                 if (banlist[i]==clientip) {
++                                       dbg_msg("server", "a banned player (ip=%d.%d.%d.%d) is trying to enter",addr.ip[0],addr.ip[1],addr.ip[2],addr.ip[3]);
++				       netserver_drop(net, cid, "You are banned");
++                                 }
++                        }
+ 			server_send_map(cid);
+ 		}
+ 		else if(msg == NETMSG_REQUEST_MAP_DATA)
+@@ -747,7 +794,7 @@
+ 					
+ 					clients[cid].authed = 1;
+ 					server_send_rcon_line(cid, "Authentication successful. Remote console access granted.");
+-					dbg_msg("server", "cid=%d authed", cid);
++					dbg_msg("server", "cid=%d authed name=%s", cid,server_clientname(cid));
+ 				}
+ 				else
+ 				{
+@@ -969,6 +1016,7 @@
+ 				if(server_load_map(config.sv_map))
+ 				{
+ 					int c;
++					char fichier[32];
+ 					
+ 					/* new map loaded */
+ 					mods_shutdown();
+@@ -988,6 +1036,9 @@
+ 					game_start_time = time_get();
+ 					current_tick = 0;
+ 					mods_init();
++					str_format(fichier, sizeof(fichier), config.sv_map);
++					strcat(fichier,".cfg");
++					console_execute_file(fichier);
+ 				}
+ 				else
+ 				{
+@@ -1044,6 +1095,22 @@
+ 					server_do_snap();
+ 					perf_end();
+ 				}
++       				if (bans>0) {
++					int i=0,j=0;
++                			for (i=0; i<bans; i++) {
++						if(bantime[i] != 0 && server_tick()-bantime[i] > server_tickspeed())
++						{
++							dbg_msg("server","the IP=%d:%d:%d:%d is no longer banned",i,((banlist[i]>>24)&0xFF),((banlist[i]>>16)&0xFF),((banlist[i]>>8)&0xFF),(banlist[i]&0xFF));
++							for (j=i; j<bans; j++) {
++								banlist[j]=banlist[j+1];
++								bantime[j]=bantime[j+1];
++			       				}
++			       				bans--;
++							realloc(banlist,sizeof(long)*bans);
++							realloc(bantime,sizeof(long)*bans);
++		       				 }
++					}
++				}
+ 			}
+ 			
+ 			/* master server stuff */
+@@ -1100,6 +1167,58 @@
+ 	server_kick(console_arg_int(result, 0), "kicked by console");
+ }
+ 
++static void con_ban(void *result, void *user_data) {
++        NETADDR4 addr;
++        int clientip;
++	char reason[256];
++        netserver_client_addr(net, console_arg_int(result, 0), &addr);
++
++        clientip=(addr.ip[0]<<24)+(addr.ip[1]<<16)+(addr.ip[2]<<8)+addr.ip[3];
++        dbg_msg("server", "the ip %d.%d.%d.%d is now banned",addr.ip[0],addr.ip[1],addr.ip[2],addr.ip[3]);
++
++        bans++;
++        if (bans==1) {banlist=malloc(sizeof(long));bantime=malloc(sizeof(long));}
++        else {banlist=realloc(banlist,sizeof(long)*bans);bantime=realloc(bantime,sizeof(long)*bans);}
++        banlist[bans-1]=clientip;
++	if(console_arg_int(result, 1) > 0)bantime[bans-1]=server_tick()+server_tickspeed()*console_arg_int(result, 1)*60;
++	else bantime[bans-1]=0;
++
++	if(console_arg_int(result, 1) > 0)str_format(reason, sizeof(reason), "Banned by console for %d minutes",console_arg_int(result, 1));
++	else str_format(reason, sizeof(reason), "Banned by console permanently.");
++	server_kick(console_arg_int(result, 0), reason);
++}
++
++static void con_banlist(void *result, void *user_data) {
++        int i,timebanned=0;
++        if (bans>0) {
++                for (i=0; i<bans; i++) {
++			if(bantime[i] > 0)timebanned=(bantime[i]-server_tick())/(server_tickspeed()*60);
++			else timebanned=0;
++                        dbg_msg("server","banid=%d, IP=%d:%d:%d:%d, time:%d min",i,((banlist[i]>>24)&0xFF),((banlist[i]>>16)&0xFF),((banlist[i]>>8)&0xFF),(banlist[i]&0xFF),timebanned);
++                }
++        } else {
++                dbg_msg("server","there is no ban");
++        }
++}
++
++static void con_unban(void *result, void *user_data) {
++        int i=0;
++        int d=console_arg_int(result, 0);
++
++        if (d<0 || d>=bans) dbg_msg("server","no such banid: %d, type banlist to see banids",d);
++        else 
++	{
++		dbg_msg("server","the IP=%d:%d:%d:%d is no longer banned",d,((banlist[d]>>24)&0xFF),((banlist[d]>>16)&0xFF),((banlist[d]>>8)&0xFF),(banlist[d]&0xFF));
++                for (i=d; i<bans; i++) {
++                        banlist[i]=banlist[i+1];
++			bantime[i]=bantime[i+1];
++                }
++                bans--;
++                realloc(banlist,sizeof(long)*bans);
++		realloc(bantime,sizeof(long)*bans);
++	}
++}
++
+ static void con_status(void *result, void *user_data)
+ {
+ 	int i;
+@@ -1127,6 +1246,9 @@
+ 	MACRO_REGISTER_COMMAND("kick", "i", con_kick, 0);
+ 	MACRO_REGISTER_COMMAND("status", "", con_status, 0);
+ 	MACRO_REGISTER_COMMAND("shutdown", "", con_shutdown, 0);
++        MACRO_REGISTER_COMMAND("ban", "ii", con_ban, 0);
++        MACRO_REGISTER_COMMAND("banlist", "", con_banlist, 0);
++        MACRO_REGISTER_COMMAND("unban", "i", con_unban, 0);
+ }
+ 
+ int main(int argc, char **argv)
+Seulement dans ubuntu/src/engine/server: es_server.c~
+diff -ru teeworlds-0.4.2-src/src/game/g_collision.cpp ubuntu/src/game/g_collision.cpp
+--- teeworlds-0.4.2-src/src/game/g_collision.cpp	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/g_collision.cpp	2008-05-20 22:30:25.000000000 +0200
+@@ -8,8 +8,10 @@
+ #include <game/g_layers.h>
+ 
+ static TILE *tiles;
++static int *dest[10];
+ static int width = 0;
+ static int height = 0;
++static int len[10];
+ 
+ int col_width() { return width; }
+ int col_height() { return height; }
+@@ -19,6 +21,25 @@
+ 	width = layers_game_layer()->width;
+ 	height = layers_game_layer()->height;
+ 	tiles = (TILE *)map_get_data(layers_game_layer()->data);
++	mem_zero(&len, sizeof(len));
++	for(int i=width*height-1;i>=0;i--) {
++		if(tiles[i].index==TILE_AIR) {
++			len[0]++;
++		} else if((tiles[i].index&1)!=0 && tiles[i].index>2 && tiles[i].index<21) {
++			len[tiles[i].index>>1]++;
++		}
++	}
++	for(int i=0;i<10;i++) {
++		dest[i] = new int[len[i]];
++		len[i] = 0;
++	}
++	for(int i=width*height-1;i>=0;i--) {
++		if(tiles[i].index==TILE_AIR) {
++			dest[0][len[0]++] = i;
++		} else if((tiles[i].index&1)!=0 && tiles[i].index>2 && tiles[i].index<21) {
++			dest[tiles[i].index>>1][len[tiles[i].index>>1]++] = i;
++		}
++	}
+ 	return 1;
+ }
+ 
+@@ -30,12 +51,86 @@
+ 	if(nx < 0 || nx >= width || ny >= height)
+ 		return 1;
+ 	
+-	if(y < 0)
+-		return 0; // up == sky == free
++	if(y<0) {
++		return(tiles[nx].index==TILE_SOLID);
++	}
+ 	
+ 	return tiles[ny*width+nx].index == TILE_SOLID;
+ }
+ 
++int col_is_damage(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	
++	return tiles[ny*width+nx].index == TILE_DAMAGE;
++}
++
++int col_is_nohook(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(nx < 0 || nx >= width || ny >= height)
++		return 0;
++
++	if(y<0) {
++		return(tiles[nx].index==TILE_NOHOOK);
++	}
++	
++	return tiles[ny*width+nx].index == TILE_NOHOOK;
++}
++
++int col_is_teleport(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y < 0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++
++	int z = tiles[ny*width+nx].index-1;
++	if(z>2 && z<21 && (z&1)!=0) {
++		return(z>>1);
++	}
++	return(0);
++}
++int col_is_begin(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	
++	return tiles[ny*width+nx].index == TILE_BEGIN;
++}
++int col_is_end(int x, int y)
++{
++	int nx = x/32;
++	int ny = y/32;
++	if(y<0 || nx < 0 || nx >= width || ny >= height)
++		return 0;
++	
++	return tiles[ny*width+nx].index == TILE_END;
++}
++vec2 teleport(int a) {
++	if(len[a]>0) {
++		int r = rand()%len[a];
++		int x = (dest[a][r]%width)<<5;
++		int y = (dest[a][r]/width)<<5;
++		return(vec2((float)x+16.0,(float)y+16.0));
++	} else {
++		return(vec2(0,0));
++	}
++}
++
++vec2 rand_point() {
++	int p = rand()%len[0];
++	int x = (dest[0][p]%width)<<5;
++	int y = (dest[0][p]/width)<<5;
++	return(vec2((float)x+16.0,(float)y+16.0));
++}
++
+ // TODO: rewrite this smarter!
+ bool col_intersect_line(vec2 pos0, vec2 pos1, vec2 *out)
+ {
+@@ -57,6 +152,21 @@
+ 	return false;
+ }
+ 
++bool col_intersect_nohook(vec2 pos0, vec2 pos1)
++{
++	float d = distance(pos0, pos1);
++	
++	for(float f = 0; f < d; f++)
++	{
++		float a = f/d;
++		vec2 pos = mix(pos0, pos1, a);
++		if(col_is_nohook((int)pos.x, (int)pos.y)) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ /*
+ 	Simple collision rutines!
+ */
+Seulement dans ubuntu/src/game: g_collision.cpp~
+diff -ru teeworlds-0.4.2-src/src/game/g_collision.h ubuntu/src/game/g_collision.h
+--- teeworlds-0.4.2-src/src/game/g_collision.h	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/g_collision.h	2008-05-20 22:30:25.000000000 +0200
+@@ -4,11 +4,18 @@
+ 
+ 
+ #include <game/g_vmath.h>
+-
+ int col_init();
+ int col_is_solid(int x, int y);
++int col_is_damage(int x, int y);
++int col_is_nohook(int x, int y);
++int col_is_teleport(int x, int y);
++int col_is_begin(int x, int y);
++int col_is_end(int x, int y);
+ int col_width();
++vec2 teleport(int z);
+ int col_height();
++vec2 rand_point();
+ bool col_intersect_line(vec2 pos0, vec2 pos1, vec2 *out);
++bool col_intersect_nohook(vec2 pos0, vec2 pos1);
+ 
+ #endif
+Seulement dans ubuntu/src/game/generated: gc_data.cpp
+Seulement dans ubuntu/src/game/generated: gc_data.h
+Seulement dans ubuntu/src/game/generated: gc_internaldata.cpp
+Seulement dans ubuntu/src/game/generated: g_protocol.cpp
+Seulement dans ubuntu/src/game/generated: g_protocol.h
+Seulement dans ubuntu/src/game/generated: g_protocol_ids.h
+Seulement dans ubuntu/src/game/generated: gs_data.cpp
+Seulement dans ubuntu/src/game/generated: gs_data.h
+Seulement dans ubuntu/src/game/generated: gs_internaldata.cpp
+Seulement dans ubuntu/src/game/generated: nethash.c
+diff -ru teeworlds-0.4.2-src/src/game/g_game.cpp ubuntu/src/game/g_game.cpp
+--- teeworlds-0.4.2-src/src/game/g_game.cpp	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/g_game.cpp	2008-05-20 22:30:25.000000000 +0200
+@@ -1,6 +1,7 @@
+ /* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+ #include <string.h>
+ #include "g_game.h"
++#include <engine/e_config.h>
+ 
+ const char *tuning_params::names[] =
+ {
+@@ -271,6 +272,8 @@
+ 				going_to_hit_ground = true;
+ 
+ 			// Check against other players first
++			if(!config.sv_race_mod)
++			{			
+ 			for(int i = 0; i < MAX_CLIENTS; i++)
+ 			{
+ 				player_core *p = world->players[i];
+@@ -286,6 +289,7 @@
+ 					break;
+ 				}
+ 			}
++			}
+ 			
+ 			if(hook_state == HOOK_FLYING)
+ 			{
+@@ -371,12 +375,15 @@
+ 				continue;
+ 			
+ 			//player *p = (player*)ent;
+-			if(p == this) // || !(p->flags&FLAG_ALIVE)
+-				continue; // make sure that we don't nudge our self
+-			
++				if(p == this) // || !(p->flags&FLAG_ALIVE)
++					continue; // make sure that we don't nudge our self
++
+ 			// handle player <-> player collision
+ 			float d = distance(pos, p->pos);
+ 			vec2 dir = normalize(pos - p->pos);
++			
++			if(!config.sv_race_mod)
++			{
+ 			if(d < phys_size*1.25f && d > 1.0f)
+ 			{
+ 				float a = (phys_size*1.45f - d);
+@@ -388,7 +395,6 @@
+ 				vel = vel + dir*a*(v*0.75f);
+ 				vel = vel * 0.85f;
+ 			}
+-			
+ 			// handle hook influence
+ 			if(hooked_player == i)
+ 			{
+@@ -406,6 +412,7 @@
+ 					vel.y = saturated_add(-drag_speed, drag_speed, vel.y, -accel*dir.y*0.25f);
+ 				}
+ 			}
++			}
+ 		}
+ 	}	
+ 
+diff -ru teeworlds-0.4.2-src/src/game/g_mapitems.h ubuntu/src/game/g_mapitems.h
+--- teeworlds-0.4.2-src/src/game/g_mapitems.h	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/g_mapitems.h	2008-05-20 23:35:50.000000000 +0200
+@@ -43,8 +43,29 @@
+ 	
+ 	TILE_AIR=0,
+ 	TILE_SOLID,
++	TILE_DAMAGE,
++	TILE_D1,
++	TILE_T1,
++	TILE_D2,
++	TILE_T2,
++	TILE_D3,
++	TILE_T3,
++	TILE_D4,
++	TILE_T4,
++	TILE_D5,
++	TILE_T5,
++	TILE_D6,
++	TILE_T6,
++	TILE_D7,
++	TILE_T7,
++	TILE_D8,
++	TILE_T8,
++	TILE_D9,
++	TILE_T9,
+ 	TILE_NOHOOK,
+-	
++	TILE_BEGIN,
++	TILE_END,
++
+ 	TILEFLAG_VFLIP=1,
+ 	TILEFLAG_HFLIP=2,
+ 	TILEFLAG_OPAQUE=4,
+Seulement dans ubuntu/src/game: g_mapitems.h~
+diff -ru teeworlds-0.4.2-src/src/game/g_variables.h ubuntu/src/game/g_variables.h
+--- teeworlds-0.4.2-src/src/game/g_variables.h	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/g_variables.h	2008-05-22 15:43:22.000000000 +0200
+@@ -57,3 +57,25 @@
+ MACRO_CONFIG_INT(sv_spamprotection, 1, 0, 1)
+ 
+ MACRO_CONFIG_INT(sv_spectator_slots, 0, 0, 12)
++MACRO_CONFIG_INT(sv_reserved_slots, 0, 0, 12)
++MACRO_CONFIG_INT(sv_regen, 0, 0, 0)
++MACRO_CONFIG_INT(sv_teleport, 0, 0, 1)
++MACRO_CONFIG_STR(sv_reserved_slots_pass, 32, "")
++MACRO_CONFIG_INT(sv_strip, 0, 0, 1)
++MACRO_CONFIG_INT(sv_infinite_ammo, 0, 0, 1)
++MACRO_CONFIG_STR(sv_start, 16, "1 1 0 0 0")
++MACRO_CONFIG_INT(sv_race_mod, 1, 0, 1)
++MACRO_CONFIG_INT(sv_teleport_grenade, 0, 0, 1)
++MACRO_CONFIG_INT(sv_teleport_kill, 0, 0, 1)
++MACRO_CONFIG_INT(sv_suicide_killer, 0, 0, 1)
++MACRO_CONFIG_INT(sv_rocket_jump_damage, 1, 0, 1)
++MACRO_CONFIG_INT(sv_allow_votes, 1, 0, 1)
++MACRO_CONFIG_INT(sv_powerup_respawn, 1, 0, 10)
++MACRO_CONFIG_INT(sv_all_vote, 0, 0, 1)
++MACRO_CONFIG_STR(sv_rank_site, 32, "none")
++MACRO_CONFIG_INT(sv_ninja_fov, 20, 0, 359)
++MACRO_CONFIG_INT(sv_ninja_speed, 10, 0, 200)
++MACRO_CONFIG_INT(sv_ninja_mod, 0, 0, 1)
++MACRO_CONFIG_INT(sv_ninja_auto, 0, 0, 1)
++MACRO_CONFIG_INT(sv_ninja_fire, 1, 0, 1)
++MACRO_CONFIG_INT(sv_ninja_teleport, 1, 0, 1)
+Seulement dans ubuntu/src/game: g_variables.h~
+diff -ru teeworlds-0.4.2-src/src/game/server/gs_common.h ubuntu/src/game/server/gs_common.h
+--- teeworlds-0.4.2-src/src/game/server/gs_common.h	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/server/gs_common.h	2008-05-22 15:18:23.000000000 +0200
+@@ -282,7 +282,15 @@
+ 	NETOBJ_PLAYER_INPUT input;
+ 	int num_inputs;
+ 	int jumped;
+-	
++	int starttime;
++	int ended;
++	int started;
++	int refreshtime;
++	int changedteam_time;
++	int spamteam;
++	int ninjatime;
++	int ninjateleport;
++
+ 	int damage_taken_tick;
+ 
+ 	int health;
+@@ -299,6 +307,9 @@
+ 
+ 	//
+ 	int score;
++	int lastplayer;
++	int lastplayertime;
++	int votedfor;
+ 	int team;
+ 	int player_state; // if the client is chatting, accessing a menu or so
+ 	
+@@ -355,3 +366,5 @@
+ };
+ 
+ extern player *players;
++
++
+Seulement dans ubuntu/src/game/server: gs_common.h~
+diff -ru teeworlds-0.4.2-src/src/game/server/gs_game.cpp ubuntu/src/game/server/gs_game.cpp
+--- teeworlds-0.4.2-src/src/game/server/gs_game.cpp	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/server/gs_game.cpp	2008-05-21 21:56:41.000000000 +0200
+@@ -204,13 +204,16 @@
+ 	if(!killer)
+ 		return 0;
+ 	if(killer == victim)
+-		victim->score--; // suicide
++		if(!config.sv_race_mod)victim->score--; 
++		else victim->score;// suicide
+ 	else
+ 	{
+-		if(is_teamplay && victim->team == killer->team)
++		if(is_teamplay && victim->team == killer->team && !config.sv_race_mod)
+ 			killer->score--; // teamkill
+-		else
++		else if(!config.sv_race_mod)
+ 			killer->score++; // normal kill
++		else
++			killer->score;
+ 	}
+ 	return 0;
+ }
+Seulement dans ubuntu/src/game/server: gs_game.cpp~
+diff -ru teeworlds-0.4.2-src/src/game/server/gs_game_ctf.cpp ubuntu/src/game/server/gs_game_ctf.cpp
+--- teeworlds-0.4.2-src/src/game/server/gs_game_ctf.cpp	2008-04-05 15:13:02.000000000 +0200
++++ ubuntu/src/game/server/gs_game_ctf.cpp	2008-05-20 22:30:25.000000000 +0200
+@@ -1,6 +1,7 @@
+ /* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+ #include <engine/e_server_interface.h>
+ #include <game/g_mapitems.h>
++#include <engine/e_config.h>
+ #include "gs_common.h"
+ #include "gs_game_ctf.h"
+ 
+@@ -86,7 +87,7 @@
+ 				{
+ 					// CAPTURE! \o/
+ 					teamscore[fi^1] += 100;
+-					f->carrying_player->score += 5;
++					if(!config.sv_race_mod)f->carrying_player->score += 5;
+ 
+ 					dbg_msg("game", "flag_capture player='%d:%s'", f->carrying_player->client_id, server_clientname(f->carrying_player->client_id));
+ 
+@@ -110,7 +111,7 @@
+ 					if(!f->at_stand)
+ 					{
+ 						player *p = close_players[i];
+-						p->score += 1;
++						if(!config.sv_race_mod)p->score += 1;
+ 
+ 						dbg_msg("game", "flag_return player='%d:%s'", p->client_id, server_clientname(p->client_id));
+ 
+@@ -125,7 +126,7 @@
+ 						teamscore[fi^1]++;
+ 					f->at_stand = 0;
+ 					f->carrying_player = close_players[i];
+-					f->carrying_player->score += 1;
++					if(!config.sv_race_mod)f->carrying_player->score += 1;
+ 
+ 					dbg_msg("game", "flag_grab player='%d:%s'", f->carrying_player->client_id, server_clientname(f->carrying_player->client_id));
+ 					
+@@ -145,7 +146,7 @@
+ 			
+ 			if(!f->carrying_player && !f->at_stand)
+ 			{
+-				if(server_tick() > f->drop_tick + server_tickspeed()*30)
++				if(server_tick() > f->drop_tick + server_tickspeed()*30 || col_is_damage(f->pos.x, f->pos.y))
+ 				{
+ 					create_sound_global(SOUND_CTF_RETURN);
+ 					f->reset();
+Seulement dans ubuntu/src/game/server: gs_game_ctf.cpp~
+diff -ru teeworlds-0.4.2-src/src/game/server/gs_server.cpp ubuntu/src/game/server/gs_server.cpp
+--- teeworlds-0.4.2-src/src/game/server/gs_server.cpp	2008-05-22 00:06:31.000000000 +0200
++++ ubuntu/src/game/server/gs_server.cpp	2008-05-22 15:57:05.000000000 +0200
+@@ -2,6 +2,12 @@
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
++#include <cstdlib>
++#include <string>
++#include <sstream>
++#include <fstream>
++#include <list>
++#include <iterator>
+ #include <engine/e_config.h>
+ #include <engine/e_server_interface.h>
+ #include <game/g_version.h>
+@@ -26,6 +32,99 @@
+ void create_sound(vec2 pos, int sound, int mask=-1);
+ class player *intersect_player(vec2 pos0, vec2 pos1, float radius, vec2 &new_pos, class entity *notthis = 0);
+ class player *closest_player(vec2 pos, float radius, entity *notthis);
++int regn = 0,tele=0,strip=0;
++int start[6];
++int num_proj=50;
++class projectile_tile{
++        public:
++		int type;
++                vec2 pos;
++		vec2 dir;
++		int tick;
++		float speed;
++};
++projectile_tile projectilelist[50];
++
++class player_score {
++        public:
++                std::string my_name;
++                float my_score;
++
++                player_score(std::string n_name,float n_score) {
++                        this->my_name=n_name;
++                        this->my_score=n_score;
++                }
++                void setScore(float n_score) {
++                        this->my_score=n_score;
++                }
++                std::string name() {
++                        return this->my_name;
++                }
++                float score() {
++                        return this->my_score;
++                }
++                bool operator==(const player_score& other) {
++                        return (this->my_score==other.my_score);
++                }
++                bool operator<(const player_score& other) {
++                        return (this->my_score<other.my_score);
++                }
++};
++
++std::list<player_score> top5;
++
++std::string top5_recordfile() {
++        std::ostringstream oss;
++        oss << config.sv_map << "_record.dtb";
++        return oss.str();
++}
++
++void top5_save() {
++        std::fstream f;
++        f.open(top5_recordfile().c_str(),std::ios::out);
++        if (f.fail()==false) {
++                for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end(); i++) {
++                        f << i->name() << std::endl << i->score() << std::endl;
++                }
++        }
++        f.close();
++}
++
++void top5_load() {
++        std::fstream f;
++        f.open(top5_recordfile().c_str(),std::ios::in);
++        top5.clear();
++        while (!f.eof() && !f.fail()) {
++                std::string tmpname;
++                float tmpscore;
++                std::getline(f, tmpname);
++                if (!f.eof() && tmpname!="") {
++                        f >> tmpscore;
++                        top5.push_back(*new player_score(tmpname,tmpscore));
++                }
++        }
++        f.close();
++}
++
++void top5_parsePlayer(std::string nom,float score) {
++
++        for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end(); i++) {
++                if (i->name() == nom) {
++                        if (i->score() > score)
++                                i->setScore(score);
++                        top5.sort();
++			top5_save();
++                        return;
++                }
++        }
++        player_score nscore(nom,score);
++        top5.push_back(nscore);
++
++        top5.sort();
++	top5_save();
++}
++
++int timer_vote=-1;bool vote_called=false;int votetime=-1;char votetype[32];int votedtokick=-1;
+ 
+ game_world *world;
+ 
+@@ -120,6 +219,52 @@
+ 	server_send_msg(cid);
+ }
+ 
++void resultvote()
++{
++	int players_serv=0,total=0,voteur=0;
++	for (int i=0; i < MAX_CLIENTS;i++)
++	{
++		if(players[i].client_id !=-1)
++		{
++			if(players[i].votedfor != -1)
++			{total+=players[i].votedfor;voteur++;}
++			players_serv++;
++		}
++	}
++	char buf[256];
++	str_format(buf, sizeof(buf), "YES: %d | NO: %d (Time remaining : %d/%d secondes)",total,voteur-total,(server_tick()-timer_vote)/(server_tickspeed()),votetime);
++	send_chat(-1,CHAT_ALL,buf);
++	if (voteur==players_serv || (server_tick()-timer_vote  > server_tickspeed()*votetime && timer_vote != -1))
++	{
++		vote_called=false;
++		int result=1;
++		char message[256];
++		if((total > voteur / 2 && !config.sv_all_vote) || (total > players_serv / 2 && config.sv_all_vote))str_format(message, sizeof(message), "Result for the vote is : YES");
++		else {str_format(message, sizeof(message), "Result for the vote is : NO");result=0;}
++		send_chat(-1,CHAT_ALL,message);
++		if(!strcmp(votetype,"kick") && votedtokick != -1)
++		{	
++			if(result)
++			{
++				char reason[256];
++				//str_format(reason, sizeof(reason), "Kicked");
++				//server_kick(votedfor,reason);
++				str_format(reason, sizeof(reason), "%s has been kicked.",server_clientname(votedtokick));
++				send_chat(-1,-1, reason);
++				server_ban(votedtokick,10);
++			}	
++			str_format(votetype, sizeof(votetype), "null");
++			votedtokick = -1;	
++		}
++		for (int i=0; i < MAX_CLIENTS;i++)
++		{
++			if(players[i].client_id !=-1)
++			{
++				players[i].votedfor=-1;
++			}
++		}
++	}	
++}
+ //////////////////////////////////////////////////
+ // Event handler
+ //////////////////////////////////////////////////
+@@ -353,6 +498,7 @@
+ 	if(reset_requested)
+ 		reset();
+ 
++	if(timer_vote != -1 && server_tick()-timer_vote  > server_tickspeed()*votetime && vote_called)resultvote();
+ 	if(!paused)
+ 	{
+ 		/*
+@@ -405,8 +551,39 @@
+ 				perf_end();*/
+ 		}
+ 		/*perf_end();*/
+-	}
++		for(int i=0;i < num_proj;i++){
++			if(projectilelist[i].type==3 && (server_tick()-projectilelist[i].tick) > (server_tickspeed()*projectilelist[i].speed))
++			{
++				projectile *proj = new projectile(projectilelist[i].type,
++						-1,
++						projectilelist[i].pos,
++						projectilelist[i].dir,
++						(int)(server_tickspeed()*1000),
++						get_player(-1),
++						1, projectile::PROJECTILE_FLAGS_EXPLODE, 0, SOUND_GRENADE_EXPLODE, projectilelist[i].type);
+ 
++				// pack the projectile and send it to the client directly
++				NETOBJ_PROJECTILE p;
++				proj->fill_info(&p);
++			
++				msg_pack_start(NETMSGTYPE_SV_EXTRA_PROJECTILE, 0);
++				msg_pack_int(1);
++				for(unsigned i = 0; i < sizeof(NETOBJ_PROJECTILE)/sizeof(int); i++)
++					msg_pack_int(((int *)&p)[i]);
++				msg_pack_end();
++				server_send_msg(-1);
++
++				create_sound(projectilelist[i].pos, SOUND_GRENADE_FIRE);
++				projectilelist[i].tick=server_tick();
++			}
++			else if(projectilelist[i].type==4 && (server_tick()-projectilelist[i].tick) > (server_tickspeed()*projectilelist[i].speed))
++			{
++				new laser(projectilelist[i].pos, projectilelist[i].dir, tuning.laser_reach, get_player(-1));
++				create_sound(projectilelist[i].pos, SOUND_RIFLE_FIRE);
++				projectilelist[i].tick=server_tick();
++			}
++		}
++	}
+ 	remove_entities();
+ }
+ 
+@@ -501,20 +678,25 @@
+ 	//int collide = col_check_point((int)curpos.x, (int)curpos.y);
+ 	
+ 	entity *targetplayer = (entity*)intersect_player(prevpos, curpos, 6.0f, curpos, powner);
+-	if(targetplayer || collide || lifespan < 0)
++	if((!config.sv_race_mod && targetplayer) || collide || lifespan < 0)
+ 	{
+ 		if (lifespan >= 0 || weapon == WEAPON_GRENADE)
+ 			create_sound(curpos, sound_impact);
+ 
+ 		if (flags & PROJECTILE_FLAGS_EXPLODE)
+ 			create_explosion(curpos, owner, weapon, false);
+-		else if (targetplayer)
++		else if (targetplayer && !config.sv_race_mod)
+ 		{
+ 			targetplayer->take_damage(direction * max(0.001f, force), damage, owner, weapon);
+ 		}
+ 
+ 		world->destroy_entity(this);
+ 	}
++	int z = col_is_teleport((int)curpos.x,curpos.y);
++	if(tele && z && config.sv_teleport_grenade && weapon == WEAPON_GRENADE) {
++		pos = teleport(z);
++		start_tick=server_tick();
++	}
+ }
+ 
+ void projectile::fill_info(NETOBJ_PROJECTILE *proj)
+@@ -566,7 +748,8 @@
+ 	this->from = from;
+ 	pos = at;
+ 	energy = -1;		
+-	hit->take_damage(vec2(0,0), tuning.laser_damage, owner->client_id, WEAPON_RIFLE);
++	if(owner != get_player(-1))hit->take_damage(vec2(0,0), tuning.laser_damage, owner->client_id, WEAPON_RIFLE);
++	else hit->take_damage(vec2(0,0), tuning.laser_damage, -1, WEAPON_RIFLE);;
+ 	return true;
+ }
+ 
+@@ -682,7 +865,8 @@
+ 	emote_stop = -1;
+ 	
+ 	//direction = vec2(0.0f, 1.0f);
+-	score = 0;
++	if(config.sv_race_mod)score = -9999;
++	else score=0;
+ 	dead = true;
+ 	clear_flag(entity::FLAG_PHYSICS);
+ 	spawning = false;
+@@ -707,6 +891,8 @@
+ 	active_weapon = WEAPON_GUN;
+ 	last_weapon = WEAPON_HAMMER;
+ 	queued_weapon = -1;
++	ninjatime=-1;
++	ninjateleport=-1;
+ }
+ 
+ void player::destroy() {  }
+@@ -761,7 +947,13 @@
+ 	
+ 	die(client_id, -1);
+ 	team = new_team;
+-	score = 0;
++	started=0;
++	if(server_tick()-changedteam_time < server_tickspeed()*5)
++		spamteam++;
++	else if(spamteam > 0) spamteam--;
++	if(spamteam == 5)server_ban(client_id,15);
++	changedteam_time=server_tick();
++	if(!config.sv_race_mod)score=0;
+ 	dbg_msg("game", "team_join player='%d:%s' team=%d", client_id, server_clientname(client_id), team);
+ 	
+ 	gameobj->on_player_info_change(&players[client_id]);
+@@ -921,18 +1113,33 @@
+ 
+ 	// init weapons
+ 	mem_zero(&weapons, sizeof(weapons));
+-	weapons[WEAPON_HAMMER].got = true;
+-	weapons[WEAPON_HAMMER].ammo = -1;
+-	weapons[WEAPON_GUN].got = true;
+-	weapons[WEAPON_GUN].ammo = data->weapons[WEAPON_GUN].maxammo;
++	if(!config.sv_ninja_mod)
++	{
++		for(int i=0;i<5;i++) {
++			if(start[i]) {
++				weapons[i].got = true;
++				if (i == 0)weapons[i].ammo = -1;
++				else weapons[i].ammo = data->weapons[i].maxammo;
++			} else {
++				weapons[i].got = false;
++				weapons[i].ammo = 0;
++			}
++		}
+ 
+-	/*weapons[WEAPON_RIFLE].got = true;
+-	weapons[WEAPON_RIFLE].ammo = -1;*/
++		/*weapons[WEAPON_RIFLE].got = true;
++		weapons[WEAPON_RIFLE].ammo = -1;*/
+ 	
+-	active_weapon = WEAPON_GUN;
+-	last_weapon = WEAPON_HAMMER;
+-	queued_weapon = 0;
+-
++		active_weapon = WEAPON_GUN;
++		last_weapon = WEAPON_HAMMER;
++		queued_weapon = 0;
++	}
++	else 
++	{
++		weapons[WEAPON_NINJA].got = true;
++		active_weapon = WEAPON_NINJA;
++		last_weapon = WEAPON_NINJA;
++		queued_weapon = 0;
++	}
+ 	reload_timer = 0;
+ 
+ 	// Create sound and spawn effects
+@@ -940,6 +1147,8 @@
+ 	create_playerspawn(pos);
+ 
+ 	gameobj->on_player_spawn(this);
++	lastplayer=-1;
++	lastplayertime=-1;
+ }
+ 
+ bool player::is_grounded()
+@@ -951,12 +1160,60 @@
+ 	return false;
+ }
+ 
++int checkdir(vec2 pos,vec2 pos2)
++{
++	float distance_fovmax;
++	float distance_fovmin;
++	float angleMouse = get_angle(pos);
++	float angleAd = get_angle(pos2);
++	if(angleMouse < 0)angleMouse = (2*pi+angleMouse);
++	if(angleAd < 0)angleAd = (2*pi+angleAd);
++	distance_fovmax=(angleMouse*180/pi)+config.sv_ninja_fov/2;
++	distance_fovmin=(angleMouse*180/pi)-config.sv_ninja_fov/2;
++	if (distance_fovmax < 0)distance_fovmax = 360 + distance_fovmax;
++	if (distance_fovmin < 0)distance_fovmin = 360 + distance_fovmin;
++	distance_fovmin=(int)distance_fovmin%360;
++	distance_fovmax=(int)distance_fovmax%360;
++	if (config.sv_ninja_fov >= 180 && distance_fovmax <= 180)distance_fovmax = 180 + distance_fovmax;
++	if (angleAd*180/pi >= 0 && angleAd*180/pi < config.sv_ninja_fov && 360-distance_fovmin < config.sv_ninja_fov)
++	{
++		distance_fovmin=0;	
++	}
++	else if (angleAd*180/pi > 360-config.sv_ninja_fov && distance_fovmax < distance_fovmin)
++	{
++		distance_fovmax=359;	
++	}
++	//dbg_msg("Testing","Mouse:%f Adversaire:%f fov:%d %d",angleMouse*180/pi,angleAd*180/pi,(int)distance_fovmin,(int)distance_fovmax);
++	if (angleAd*180/pi <= distance_fovmax && angleAd*180/pi >= distance_fovmin) return 1;
++	else return 0;
++}
++
++bool col_intersect_lineplayer(vec2 pos0, vec2 pos1,int clientid, vec2 *out)
++{
++	float d = distance(pos0, pos1);
++	
++	for(float f = 0; f < d; f++)
++	{	
++		for(int i=0;i< MAX_CLIENTS;i++){
++		float a = f/d;
++		vec2 pos = mix(pos0, pos1, a);
++		if((players[i].pos == pos && players[i].client_id != -1 && players[i].client_id != clientid) || col_is_solid((int)pos.x, (int)pos.y))
++		{
++			if(out)
++				*out = pos;
++			return true;
++		}}
++	}
++	if(out)
++		*out = pos1;
++	return false;
++}
+ 
+ int player::handle_ninja()
+ {
+ 	vec2 direction = normalize(vec2(latest_input.target_x, latest_input.target_y));
+ 
+-	if ((server_tick() - ninja.activationtick) > (data->weapons[WEAPON_NINJA].duration * server_tickspeed() / 1000))
++	if ((server_tick() - ninja.activationtick) > (data->weapons[WEAPON_NINJA].duration * server_tickspeed() / 1000) && !config.sv_ninja_mod)
+ 	{
+ 		// time's up, return
+ 		weapons[WEAPON_NINJA].got = false;
+@@ -971,7 +1228,7 @@
+ 	set_weapon(WEAPON_NINJA);
+ 
+ 	// Check if it should activate
+-	if (count_input(latest_previnput.fire, latest_input.fire).presses && (server_tick() > ninja.currentcooldown))
++	if (count_input(latest_previnput.fire, latest_input.fire).presses && (server_tick() > ninja.currentcooldown) && !config.sv_ninja_mod)
+ 	{
+ 		// ok then, activate ninja
+ 		attack_tick = server_tick();
+@@ -988,7 +1245,62 @@
+ 		//release_hooked();
+ 		//release_hooks();
+ 	}
++	else if(latest_input.fire&1 && config.sv_ninja_mod || config.sv_ninja_auto && config.sv_ninja_mod)
++	{
++		// ok then, activate ninja
++		attack_tick = server_tick();
++		ninja.activationdir = direction;
++		ninja.currentcooldown = data->weapons[WEAPON_NINJA].firedelay * server_tickspeed() / 1000 + server_tick();
++		ninja.currentmovetime = data->weapons[WEAPON_NINJA].movetime * server_tickspeed() / 1000;
++		
++		// reset hit objects
++		numobjectshit = 0;
++
++		//create_sound(pos, SOUND_NINJA_FIRE);
+ 
++		// release all hooks when ninja is activated
++		//release_hooked();
++		//release_hooks();
++	}
++	if(count_input(latest_previnput.fire, latest_input.fire).presses && config.sv_ninja_auto && config.sv_ninja_mod && config.sv_ninja_fire && server_tick()-ninjatime > server_tickspeed()/2)
++	{
++		vec2 direction = normalize(vec2(latest_input.target_x, latest_input.target_y));
++		vec2 projectile_startpos = pos+direction*phys_size*0.75f;
++		projectile *proj = new projectile(WEAPON_GUN,
++			client_id,
++			projectile_startpos,
++			direction,
++			(int)(server_tickspeed()*tuning.gun_lifetime),
++			this,
++			5, 0, 0, -1, WEAPON_GUN);
++			
++		// pack the projectile and send it to the client directly
++		NETOBJ_PROJECTILE p;
++		proj->fill_info(&p);
++		
++		msg_pack_start(NETMSGTYPE_SV_EXTRA_PROJECTILE, 0);
++		msg_pack_int(1);
++		for(unsigned i = 0; i < sizeof(NETOBJ_PROJECTILE)/sizeof(int); i++)
++			msg_pack_int(((int *)&p)[i]);
++		msg_pack_end();
++		server_send_msg(client_id);
++						
++		create_sound(pos, SOUND_GUN_FIRE);
++		ninjatime = server_tick();
++	}
++	if(count_input(latest_previnput.hook, latest_input.hook).presses && config.sv_ninja_auto && config.sv_ninja_teleport && config.sv_ninja_mod && server_tick()-ninjateleport > server_tickspeed()/2)
++	{
++		core.hooked_player = -1;
++		core.hook_state = HOOK_RETRACTED;
++		core.triggered_events |= COREEVENT_HOOK_RETRACT;
++		core.hook_state = HOOK_RETRACTED;
++		vec2 tmppos;
++		int collide = col_intersect_lineplayer(core.pos, core.pos+(direction*500),client_id, &tmppos);
++		if(!collide)core.pos = core.pos+(direction*500);
++		else core.pos=tmppos-(direction*50);
++		core.hook_pos = core.pos;
++		ninjateleport = server_tick();
++	}
+ 	ninja.currentmovetime--;
+ 
+ 	if (ninja.currentmovetime == 0)
+@@ -1001,7 +1313,8 @@
+ 	if (ninja.currentmovetime > 0)
+ 	{
+ 		// Set player velocity
+-		core.vel = ninja.activationdir * data->weapons[WEAPON_NINJA].velocity;
++		if(config.sv_ninja_mod)core.vel = ninja.activationdir * config.sv_ninja_speed;
++		else core.vel = ninja.activationdir * data->weapons[WEAPON_NINJA].velocity;
+ 		vec2 oldpos = pos;
+ 		move_box(&core.pos, &core.vel, vec2(phys_size, phys_size), 0.0f);
+ 		// reset velocity so the client doesn't predict stuff
+@@ -1013,7 +1326,7 @@
+ 
+ 		// check if we hit anything along the way
+ 		{
+-			int type = NETOBJTYPE_PLAYER_CHARACTER;
++			int type = NETOBJTYPE_PLAYER_CHARACTER,a=0;
+ 			entity *ents[64];
+ 			vec2 dir = pos - oldpos;
+ 			float radius = phys_size * 2.0f; //length(dir * 0.5f);
+@@ -1036,7 +1349,8 @@
+ 					continue;
+ 
+ 				// check so we are sufficiently close
+-				if (distance(ents[i]->pos, pos) > (phys_size * 2.0f))
++				a=checkdir(direction,ents[i]->pos-pos);
++				if (distance(ents[i]->pos, pos) > (phys_size * 2.0f) || !a)
+ 					continue;
+ 
+ 				// hit a player, give him damage and stuffs...
+@@ -1149,8 +1463,9 @@
+ 			create_sound(pos, SOUND_HAMMER_FIRE);
+ 			
+ 			int type = NETOBJTYPE_PLAYER_CHARACTER;
++			int num = -1;
+ 			entity *ents[64];
+-			int num = world->find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, ents, 64, &type, 1);			
++			if(!config.sv_race_mod)num = world->find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, ents, 64, &type, 1);			
+ 
+ 			for (int i = 0; i < num; i++)
+ 			{
+@@ -1267,7 +1582,7 @@
+ 		
+ 	}
+ 
+-	if(weapons[active_weapon].ammo > 0) // -1 == unlimited
++	if(weapons[active_weapon].ammo > 0 && !config.sv_infinite_ammo) // -1 == unlimited
+ 		weapons[active_weapon].ammo--;
+ 	attack_tick = server_tick();
+ 	reload_timer = data->weapons[active_weapon].firedelay * server_tickspeed() / 1000;
+@@ -1422,10 +1737,87 @@
+ 	//core.jumped = jumped;
+ 	core.input = input;
+ 	core.tick();
++	if (players[client_id].started && server_tick()-players[client_id].refreshtime > server_tickspeed() && config.sv_race_mod)
++	{
++	char buf[128];
++	int time=(server_tick()-players[client_id].starttime)/server_tickspeed();
++	sprintf(buf,"Current time: %d min %d seconde",time/60,(time%60));
++	send_broadcast(buf, client_id);
++	players[client_id].refreshtime=server_tick();
++	}
+ 
+ 	// handle weapons
+ 	handle_weapons();
+-
++	if(regn && (server_tick()%regn)==0) {
++		if(health<10) {
++			health++;
++		} else if(armor<10) {
++			armor++;
++		}
++	}
++	if(col_is_damage((int)core.pos.x,core.pos.y)) {
++		if(lastplayer != -1 && config.sv_suicide_killer && server_tick()-lastplayertime < server_tickspeed()*5){die(lastplayer,-1);score--;}
++		else die(client_id,-1);
++	}
++	else if(col_is_begin((int)core.pos.x,core.pos.y)) {
++		players[client_id].starttime=server_tick();
++		players[client_id].ended=0;
++		players[client_id].started=1;
++		players[client_id].refreshtime=server_tick();
++	}
++	else if(col_is_end((int)core.pos.x,core.pos.y) && !players[client_id].ended && players[client_id].started) {
++		float time=((float)(server_tick()-players[client_id].starttime))/((float) server_tickspeed());
++		char buf[128];
++		sprintf(buf,"%s finished in: %d min %d seconde",server_clientname(client_id),(int) time/60,((int)time%60));
++		send_chat(-1,CHAT_ALL, buf);
++		int ttime = 0 - (int) time;
++		players[client_id].ended=1;
++		players[client_id].started=0;
++		if (players[client_id].score < ttime)players[client_id].score=ttime;
++		top5_parsePlayer(server_clientname(client_id),(float) time);
++	}
++	int z = col_is_teleport((int)core.pos.x,core.pos.y);
++	if(tele && z) {
++		core.hooked_player = -1;
++		core.hook_state = HOOK_RETRACTED;
++		core.triggered_events |= COREEVENT_HOOK_RETRACT;
++		core.hook_state = HOOK_RETRACTED;
++		core.pos = teleport(z);
++		core.hook_pos = core.pos;
++		player* cplayer = closest_player(core.pos, 20.0f, this);
++		if(cplayer && cplayer->client_id != -1 && config.sv_teleport_kill){
++			cplayer->die(client_id,-1);
++		dbg_msg("Rajh","%s sest teleporter sur : %s",server_clientname(client_id),server_clientname(cplayer->client_id));}
++		if(strip) {
++			active_weapon = WEAPON_HAMMER;
++			last_weapon = WEAPON_HAMMER;
++			if(z&1) {
++				weapons[0].got = true;
++				for(int i=1;i<5;i++) {
++					weapons[i].got = false;
++				}
++			} else {
++				for(int i=0;i<5;i++) {
++					if(start[i]) {
++						weapons[i].got = true;
++						weapons[i].ammo = data->weapons[i].maxammo;
++					} else {
++						weapons[i].got = false;
++						weapons[i].ammo = 0;
++					}
++				}
++			}
++		}
++	}
++	if((core.hook_state==HOOK_FLYING || core.hook_state==HOOK_GRABBED) && col_intersect_nohook(core.pos,core.hook_pos)) {
++		core.hooked_player = -1;
++		core.hook_state = HOOK_RETRACTED;
++		core.triggered_events |= COREEVENT_HOOK_RETRACT;
++		core.hook_state = HOOK_RETRACTED;
++		core.hook_pos = core.pos;
++		core.hook_tick = 0;
++	}
++	if (core.hooked_player != -1){players[core.hooked_player].lastplayer=client_id;players[core.hooked_player].lastplayertime=server_tick();}
+ 	player_state = input.player_state;
+ 
+ 	// Previnput
+@@ -1521,7 +1913,7 @@
+ 
+ bool player::take_damage(vec2 force, int dmg, int from, int weapon)
+ {
+-	core.vel += force;
++	if(!config.sv_race_mod || (config.sv_race_mod && from == client_id))core.vel += force;
+ 	
+ 	if(gameobj->is_friendly_fire(client_id, from) && !config.sv_teamdamage)
+ 		return false;
+@@ -1529,6 +1921,7 @@
+ 	// player only inflicts half damage on self
+ 	if(from == client_id)
+ 		dmg = max(1, dmg/2);
++	if(from == client_id && !config.sv_rocket_jump_damage)dmg=0;
+ 
+ 	// CTF and TDM (TODO: check for FF)
+ 	//if (gameobj->gametype != GAMETYPE_DM && from >= 0 && players[from].team == team)
+@@ -1571,6 +1964,8 @@
+ 		}
+ 		
+ 		health -= dmg;
++		lastplayer=from;
++		lastplayertime=server_tick();
+ 	}
+ 
+ 	damage_taken_tick = server_tick();
+@@ -1690,10 +2085,11 @@
+ 	subtype = _subtype;
+ 	proximity_radius = phys_size;
+ 
+-	reset();
++	if(!config.sv_ninja_mod)
++	{reset();
+ 
+ 	// TODO: should this be done here?
+-	world->insert_entity(this);
++	world->insert_entity(this);}
+ }
+ 
+ void powerup::reset()
+@@ -1806,7 +2202,7 @@
+ 		{
+ 			dbg_msg("game", "pickup player='%d:%s' item=%d/%d",
+ 				pplayer->client_id, server_clientname(pplayer->client_id), type, subtype);
+-			spawntick = server_tick() + server_tickspeed() * respawntime;
++			spawntick = server_tick() + server_tickspeed() * respawntime * config.sv_powerup_respawn;
+ 		}
+ 	}
+ }
+@@ -2012,6 +2408,35 @@
+ 
+ 	if(world->paused) // make sure that the game object always updates
+ 		gameobj->tick();
++	if(config.sv_regen>=0) {
++		char buf[128];
++		regn = config.sv_regen;
++		if(regn>0) {
++			sprintf(buf,"Tee's regenerate health at %.2f health/sec",50.0/(float)regn);
++		} else {
++			sprintf(buf,"Tee's no longer regenerate health.");
++		}
++		send_chat(-1,-2,buf);
++		config.sv_regen = -1;}
++	else if(config.sv_teleport) {
++		tele = tele?0:1;
++		char buf[128];
++		tele?sprintf(buf,"Teleport tiles will teleport tee's."):sprintf(buf,"Teleport tiles will no longer teleport tee's.");
++		send_chat(-1,-2,buf);
++		config.sv_teleport = 0;}
++	else if(config.sv_strip) {
++		strip = strip?0:1;
++		char buf[128];
++		strip?sprintf(buf,"Tee's will have weapons removed on teleport."):sprintf(buf,"Tee's will not lose weapons on teleport.");
++		send_chat(-1,-2,buf);
++		config.sv_strip = 0;
++	}
++	 else if(config.sv_start[0]!=0) {
++		sscanf(config.sv_start,"%d %d %d %d %d",&(start[0]),&(start[1]),&(start[2]),&(start[3]),&start[4]);
++		char buf[128];
++		sprintf(buf,"%s%s%s%s%senabled on spawn!",start[0]?"Hammer ":"",start[1]?"Pistol ":"",start[2]?"Shotgun ":"",start[3]?"Grenade ":"",start[4]?"Rifle ":"");
++		send_chat(-1,-2,buf);
++		config.sv_start[0] = 0;}
+ }
+ 
+ void mods_snap(int client_id)
+@@ -2057,7 +2482,12 @@
+ 	players[client_id].respawn();
+ 	dbg_msg("game", "join player='%d:%s'", client_id, server_clientname(client_id));
+ 
+-
++	if(config.sv_race_mod)players[client_id].score=-9999;
++	else players[client_id].score=0;
++	players[client_id].started=0;
++	players[client_id].votedfor=-1;
++	players[client_id].changedteam_time=-1;
++	players[client_id].spamteam=0;
+ 	char buf[512];
+ 	str_format(buf, sizeof(buf), "%s entered and joined the %s", server_clientname(client_id), get_team_name(players[client_id].team));
+ 	send_chat(-1, CHAT_ALL, buf); 
+@@ -2090,13 +2520,46 @@
+ 	send_chat(-1, CHAT_ALL, buf);
+ 
+ 	dbg_msg("game", "leave player='%d:%s'", client_id, server_clientname(client_id));
+-
+ 	gameobj->on_player_death(&players[client_id], 0, -1);
+ 	world->remove_entity(&players[client_id]);
+ 	world->core.players[client_id] = 0x0;
+ 	players[client_id].client_id = -1;
+ }
+ 
++void top5_draw(int id) {
++        int pos=1;
++	char buf[512];
++        send_chat(-1,CHAT_ALL,"----------- Top 5 -----------");
++        for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end() && pos<=5; i++) {
++                std::ostringstream oss;
++                oss << pos << ". " << i->name() << " Time:" << (int)(i->score())/60 << " minutes " << i->score()-((int)i->score()/60)*60 <<" secondes.";
++                send_chat(-1, CHAT_ALL, oss.str().c_str());
++                pos++;
++        }
++	str_format(buf, sizeof(buf), "-----------------------------(%s)",server_clientname(id));
++	send_chat(-1, CHAT_ALL, buf);
++}
++
++void rank_draw(int id) {
++        int pos=1;;
++	float found=-1;
++	char buf[512];
++        for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end(); i++) {
++		if(!strcmp(i->name().c_str(),server_clientname(id))){found=i->score();break;}
++                pos++;
++        }
++	if(found != -1){
++	str_format(buf, sizeof(buf), "%s Rank: %d Time:%d minutes %f secondes",server_clientname(id),pos,(int)found/60,found-((int)found/60)*60,config.sv_rank_site);
++	send_chat(-1, CHAT_ALL, buf);
++	str_format(buf, sizeof(buf), "See all rank at %s",config.sv_rank_site);
++	send_chat(-1, CHAT_ALL, buf);
++	}
++	else{
++	str_format(buf, sizeof(buf), "%s is not ranked",server_clientname(id));
++	send_chat(-1, CHAT_ALL, buf);
++	}
++}
++
+ void mods_message(int msgtype, int client_id)
+ {
+ 	void *rawmsg = netmsg_secure_unpack(msgtype);
+@@ -2118,11 +2581,113 @@
+ 		if(config.sv_spamprotection && players[client_id].last_chat+time_freq() > time_get())
+ 		{
+ 			// consider this as spam
++			if(!strcasecmp(msg->message, ".info") || !strcasecmp(msg->message, ".mods") || !strcasecmp(msg->message, "/top5") || !strcasecmp(msg->message, "/rank"))
++			players[client_id].last_chat = time_get()+time_freq()*10;
++			else players[client_id].last_chat = time_get();
+ 		}
+ 		else
+ 		{
+-			players[client_id].last_chat = time_get();
+-			send_chat(client_id, team, msg->message);
++			if(!strcasecmp(msg->message, ".info"))
++			{
++				char buf[128];
++				str_format(buf, sizeof(buf), "Mod for ubuntu version -1.7 join ThePuMa@irc.freenode.org (say .mods). (C)Rajh(%s)",server_clientname(client_id));
++				send_chat(-1,CHAT_ALL,buf);
++				players[client_id].last_chat = time_get()+time_freq()*10;
++			}
++			else if(!strcasecmp(msg->message, ".mods"))
++			{
++				char buf[128];
++				str_format(buf, sizeof(buf), "Mod used : Homing fun (C)ShootMe | Kick/ban (C)GregWar (%s)",server_clientname(client_id));
++				send_chat(-1,CHAT_ALL,buf);
++				players[client_id].last_chat = time_get()+time_freq()*10;
++			}
++			else if(!strcasecmp(msg->message, "/top5") && config.sv_race_mod)
++			{
++				top5_draw(client_id);
++				players[client_id].last_chat = time_get()+time_freq()*10;
++			}
++			else if(!strcasecmp(msg->message, "/rank") && config.sv_race_mod)
++			{
++				rank_draw(client_id);
++				players[client_id].last_chat = time_get()+time_freq()*10;
++			}
++			/*else if (!strncasecmp(msg->message, "/kickid",7) && !vote_called && config.sv_allow_votes)
++			{
++				int tmpclientid=msg->message[9];
++				if(players[tmpclientid].client_id != -1)
++				{
++					votetime =60;
++					str_format(votetype, sizeof(votetype), "kick");
++					votedtokick=tmpclientid;
++					char buf[512];
++					str_format(buf, sizeof(buf), "||| Vote for: kick %s (say \"/yes\" or \"/no\") |||(%s)", server_clientname(tmpclientid),server_clientname(client_id));
++					send_chat(-1, CHAT_ALL, buf);
++					vote_called=true;
++					timer_vote = server_tick();
++				}
++			}*/
++			else if (!strncasecmp(msg->message, "/kick",5) && !vote_called && config.sv_allow_votes)
++			{
++				int playersnumber=0;
++				int playerstokick=-1;
++				char message[256];
++				for (int i=0; i < MAX_CLIENTS;i++)
++				{
++					if(players[i].client_id !=-1)
++					{
++						str_format(message, sizeof(message), "/kick ");
++						strcat(message,server_clientname(i));
++						if(!strncmp(msg->message, message,9))
++						{
++							playersnumber++;
++							playerstokick=i;
++						}
++					}
++				}
++				if(playersnumber == 1 && playerstokick != -1)
++				{
++					votetime =60;
++					str_format(votetype, sizeof(votetype), "kick");
++					votedtokick=playerstokick;
++					char buf[512];
++					str_format(buf, sizeof(buf), "||| Vote for: kick %s (say \"/yes\" or \"/no\") |||(%s)", server_clientname(playerstokick),server_clientname(client_id));
++					send_chat(-1, CHAT_ALL, buf);
++					vote_called=true;
++					timer_vote = server_tick();
++				}
++				else if(playersnumber > 1)
++				{
++					char buf[512];
++					str_format(buf, sizeof(buf), "||| Several players possible |||(%s)", server_clientname(client_id));
++					send_chat(-1, CHAT_ALL, buf);
++			
++				}
++			}
++			else if (!strncasecmp(msg->message, "/yes",3) && players[client_id].votedfor == -1 && vote_called)
++			{
++				char message[256];
++				str_format(message, sizeof(message), "%s voted for yes",server_clientname(client_id));
++				send_chat(-1,CHAT_ALL,message);
++				players[client_id].votedfor = 1;
++				resultvote();
++			}
++			else if (!strncasecmp(msg->message, "/no",2) && players[client_id].votedfor == -1 && vote_called)
++			{
++				char message[256];
++				str_format(message, sizeof(message), "%s voted for no",server_clientname(client_id));
++				send_chat(-1,CHAT_ALL,message);
++				players[client_id].votedfor = 0;
++				resultvote();
++			}
++			else if (!strncasecmp(msg->message, "/currentvote",2) && vote_called)
++			{
++				resultvote();
++			}
++			else
++			{
++				players[client_id].last_chat = time_get();
++				send_chat(client_id, team, msg->message);
++			}
+ 		}
+ 	}
+ 	else if (msgtype == NETMSGTYPE_CL_SETTEAM)
+@@ -2274,16 +2839,120 @@
+ 	players[client_id].set_team(team);
+ }
+ 
++static void con_vote(void *result, void *user_data)
++{
++	votetime =console_arg_int(result, 0);
++	char buf[512];
++	str_format(buf, sizeof(buf), "||| Vote for: %s (say \"/yes\" or \"/no\") |||", console_arg_string(result, 1));
++	send_chat(-1, CHAT_ALL, buf);
++	vote_called=true;
++	//if (console_arg_int(result, 0) == 1)
++	timer_vote = server_tick();
++	//else world->timer_vote = -1;
++}
++
++static void con_kill_pl(void *result, void *user_data)
++{
++	players[console_arg_int(result, 0)].die(-1,-1);
++	char buf[512];
++	str_format(buf, sizeof(buf), "%s Killed by admin", server_clientname(console_arg_int(result, 0)));
++	send_chat(-1, CHAT_ALL, buf);
++}
++
++static void con_teleport(void *result, void *user_data)
++{
++	players[console_arg_int(result, 0)].core.pos=players[console_arg_int(result, 1)].core.pos;
++	players[console_arg_int(result, 0)].started=0;
++}
++
++static void con_teleport_to(void *result, void *user_data)
++{
++	players[console_arg_int(result, 0)].core.pos.x=console_arg_int(result, 1);
++	players[console_arg_int(result, 0)].core.pos.y=console_arg_int(result, 2);
++	players[console_arg_int(result, 0)].started=0;
++}
++
++static void con_get_pos(void *result, void *user_data)
++{
++	dbg_msg("Tele","%s pos: %d @ %d", server_clientname(console_arg_int(result, 0)),(int) players[console_arg_int(result, 0)].core.pos.x,(int)players[console_arg_int(result, 0)].core.pos.y);
++
++}
++
++static void con_projectile_add(void *result, void *user_data)
++{
++	vec2 pos_proj,dir_proj;
++	pos_proj.x=console_arg_float(result, 1);
++	pos_proj.y=console_arg_float(result, 2);
++	dir_proj.x=console_arg_float(result, 3);
++	dir_proj.y=console_arg_float(result, 4);
++	for (int i=0;i < num_proj;i++){
++		if(!projectilelist[i].type)
++		{
++			projectilelist[i].pos= pos_proj;
++			projectilelist[i].dir= dir_proj;
++			projectilelist[i].speed= console_arg_float(result, 5);
++			projectilelist[i].tick=server_tick()+server_tickspeed()*console_arg_float(result, 6);
++			break;
++		}
++	}
++}
++
++static void con_projectile_remove(void *result, void *user_data)
++{
++	int i=console_arg_int(result, 0);
++	if (i >= 0 && i <num_proj)
++	projectilelist[i].type=0;
++}
++
++static void con_projectile_remove_all(void *result, void *user_data)
++{
++	for (int i = 0;i <num_proj;i++){
++		projectilelist[i].type=0;
++	}
++}
++
++static void con_projectile_add_auto(void *result, void *user_data)
++{
++	int clientid=console_arg_int(result, 0);
++	if(players[clientid].client_id != -1)
++	{
++		vec2 direction = normalize(vec2(players[clientid].latest_input.target_x, players[clientid].latest_input.target_y));
++	 	vec2 projectile_startpos = players[clientid].pos+direction*players[clientid].phys_size*0.75f;
++		for (int i=0;i < num_proj;i++){
++			if(!projectilelist[i].type)
++			{
++				projectilelist[i].type=console_arg_int(result, 1);
++				if(console_arg_int(result, 1) == 3)projectilelist[i].pos=projectile_startpos;
++				else projectilelist[i].pos=players[clientid].pos;
++				projectilelist[i].dir= direction;
++				projectilelist[i].speed= console_arg_float(result, 2);
++				projectilelist[i].tick=server_tick();
++				dbg_msg("projectile","New projectile type=%d | pos.x = %f | pos.y = %f | dir.x = %f | dir.y = %f | speed = %d",projectilelist[i].type,projectilelist[i].pos.x,projectilelist[i].pos.y,projectilelist[i].dir.x,projectilelist[i].dir.y,projectilelist[i].speed);
++				break;
++			}
++		}
++	}
++}
++
+ void mods_console_init()
+ {
+ 	MACRO_REGISTER_COMMAND("tune", "si", con_tune_param, 0);
+ 	MACRO_REGISTER_COMMAND("tune_reset", "", con_tune_reset, 0);
+ 	MACRO_REGISTER_COMMAND("tune_dump", "", con_tune_dump, 0);
+ 
++	MACRO_REGISTER_COMMAND("vote", "ir", con_vote, 0);
++	MACRO_REGISTER_COMMAND("teleport", "ii", con_teleport, 0);
++	MACRO_REGISTER_COMMAND("teleport_to", "iii", con_teleport_to, 0);
++	MACRO_REGISTER_COMMAND("get_pos", "i", con_get_pos, 0);
++	MACRO_REGISTER_COMMAND("kill_pl", "i", con_kill_pl, 0);
+ 	MACRO_REGISTER_COMMAND("restart", "?i", con_restart, 0);
+ 	MACRO_REGISTER_COMMAND("broadcast", "r", con_broadcast, 0);
+ 	MACRO_REGISTER_COMMAND("say", "r", con_say, 0);
+ 	MACRO_REGISTER_COMMAND("set_team", "ii", con_set_team, 0);
++	MACRO_REGISTER_COMMAND("projectile_add", "iiiiiii", con_projectile_add, 0);
++	MACRO_REGISTER_COMMAND("projectile_add_auto", "iii", con_projectile_add_auto, 0);
++	MACRO_REGISTER_COMMAND("projectile_remove", "i", con_projectile_remove, 0);
++	MACRO_REGISTER_COMMAND("projectile_remove_all", "", con_projectile_remove_all, 0);
+ }
+ 
+ void mods_init()
+@@ -2339,6 +3008,7 @@
+ 				players[MAX_CLIENTS-i-1].team = i&1;
+ 		}
+ 	}
++	top5_load();
+ }
+ 
+ void mods_shutdown()
+Seulement dans ubuntu/src/game/server: gs_server.cpp~
