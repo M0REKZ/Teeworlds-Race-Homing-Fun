@@ -204,13 +204,16 @@ int gameobject::on_player_death(class player *victim, class player *killer, int 
 	if(!killer)
 		return 0;
 	if(killer == victim)
-		victim->score--; // suicide
+		if(!config.sv_race_mod)victim->score--; 
+		else victim->score;// suicide
 	else
 	{
-		if(is_teamplay && victim->team == killer->team)
+		if(is_teamplay && victim->team == killer->team && !config.sv_race_mod)
 			killer->score--; // teamkill
-		else
+		else if(!config.sv_race_mod)
 			killer->score++; // normal kill
+		else
+			killer->score;
 	}
 	return 0;
 }

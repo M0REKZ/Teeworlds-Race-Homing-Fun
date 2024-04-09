@@ -2,6 +2,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <cstdlib>
+#include <string>
+#include <sstream>
+#include <fstream>
+#include <list>
+#include <iterator>
 #include <engine/e_config.h>
 #include <engine/e_server_interface.h>
 #include <game/g_version.h>
@@ -26,6 +32,99 @@ void create_death(vec2 p, int who);
 void create_sound(vec2 pos, int sound, int mask=-1);
 class player *intersect_player(vec2 pos0, vec2 pos1, float radius, vec2 &new_pos, class entity *notthis = 0);
 class player *closest_player(vec2 pos, float radius, entity *notthis);
+int regn = 0,tele=0,strip=0;
+int start[6];
+int num_proj=50;
+class projectile_tile{
+        public:
+		int type;
+                vec2 pos;
+		vec2 dir;
+		int tick;
+		float speed;
+};
+projectile_tile projectilelist[50];
+
+class player_score {
+        public:
+                std::string my_name;
+                float my_score;
+
+                player_score(std::string n_name,float n_score) {
+                        this->my_name=n_name;
+                        this->my_score=n_score;
+                }
+                void setScore(float n_score) {
+                        this->my_score=n_score;
+                }
+                std::string name() {
+                        return this->my_name;
+                }
+                float score() {
+                        return this->my_score;
+                }
+                bool operator==(const player_score& other) {
+                        return (this->my_score==other.my_score);
+                }
+                bool operator<(const player_score& other) {
+                        return (this->my_score<other.my_score);
+                }
+};
+
+std::list<player_score> top5;
+
+std::string top5_recordfile() {
+        std::ostringstream oss;
+        oss << config.sv_map << "_record.dtb";
+        return oss.str();
+}
+
+void top5_save() {
+        std::fstream f;
+        f.open(top5_recordfile().c_str(),std::ios::out);
+        if (f.fail()==false) {
+                for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end(); i++) {
+                        f << i->name() << std::endl << i->score() << std::endl;
+                }
+        }
+        f.close();
+}
+
+void top5_load() {
+        std::fstream f;
+        f.open(top5_recordfile().c_str(),std::ios::in);
+        top5.clear();
+        while (!f.eof() && !f.fail()) {
+                std::string tmpname;
+                float tmpscore;
+                std::getline(f, tmpname);
+                if (!f.eof() && tmpname!="") {
+                        f >> tmpscore;
+                        top5.push_back(*new player_score(tmpname,tmpscore));
+                }
+        }
+        f.close();
+}
+
+void top5_parsePlayer(std::string nom,float score) {
+
+        for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end(); i++) {
+                if (i->name() == nom) {
+                        if (i->score() > score)
+                                i->setScore(score);
+                        top5.sort();
+			top5_save();
+                        return;
+                }
+        }
+        player_score nscore(nom,score);
+        top5.push_back(nscore);
+
+        top5.sort();
+	top5_save();
+}
+
+int timer_vote=-1;bool vote_called=false;int votetime=-1;char votetype[32];int votedtokick=-1;
 
 game_world *world;
 
@@ -120,6 +219,52 @@ void send_tuning_params(int cid)
 	server_send_msg(cid);
 }
 
+void resultvote()
+{
+	int players_serv=0,total=0,voteur=0;
+	for (int i=0; i < MAX_CLIENTS;i++)
+	{
+		if(players[i].client_id !=-1)
+		{
+			if(players[i].votedfor != -1)
+			{total+=players[i].votedfor;voteur++;}
+			players_serv++;
+		}
+	}
+	char buf[256];
+	str_format(buf, sizeof(buf), "YES: %d | NO: %d (Time remaining : %d/%d secondes)",total,voteur-total,(server_tick()-timer_vote)/(server_tickspeed()),votetime);
+	send_chat(-1,CHAT_ALL,buf);
+	if (voteur==players_serv || (server_tick()-timer_vote  > server_tickspeed()*votetime && timer_vote != -1))
+	{
+		vote_called=false;
+		int result=1;
+		char message[256];
+		if((total > voteur / 2 && !config.sv_all_vote) || (total > players_serv / 2 && config.sv_all_vote))str_format(message, sizeof(message), "Result for the vote is : YES");
+		else {str_format(message, sizeof(message), "Result for the vote is : NO");result=0;}
+		send_chat(-1,CHAT_ALL,message);
+		if(!strcmp(votetype,"kick") && votedtokick != -1)
+		{	
+			if(result)
+			{
+				char reason[256];
+				//str_format(reason, sizeof(reason), "Kicked");
+				//server_kick(votedfor,reason);
+				str_format(reason, sizeof(reason), "%s has been kicked.",server_clientname(votedtokick));
+				send_chat(-1,-1, reason);
+				server_ban(votedtokick,10);
+			}	
+			str_format(votetype, sizeof(votetype), "null");
+			votedtokick = -1;	
+		}
+		for (int i=0; i < MAX_CLIENTS;i++)
+		{
+			if(players[i].client_id !=-1)
+			{
+				players[i].votedfor=-1;
+			}
+		}
+	}	
+}
 //////////////////////////////////////////////////
 // Event handler
 //////////////////////////////////////////////////
@@ -353,6 +498,7 @@ void game_world::tick()
 	if(reset_requested)
 		reset();
 
+	if(timer_vote != -1 && server_tick()-timer_vote  > server_tickspeed()*votetime && vote_called)resultvote();
 	if(!paused)
 	{
 		/*
@@ -405,8 +551,39 @@ void game_world::tick()
 				perf_end();*/
 		}
 		/*perf_end();*/
-	}
+		for(int i=0;i < num_proj;i++){
+			if(projectilelist[i].type==3 && (server_tick()-projectilelist[i].tick) > (server_tickspeed()*projectilelist[i].speed))
+			{
+				projectile *proj = new projectile(projectilelist[i].type,
+						-1,
+						projectilelist[i].pos,
+						projectilelist[i].dir,
+						(int)(server_tickspeed()*1000),
+						get_player(-1),
+						1, projectile::PROJECTILE_FLAGS_EXPLODE, 0, SOUND_GRENADE_EXPLODE, projectilelist[i].type);
 
+				// pack the projectile and send it to the client directly
+				NETOBJ_PROJECTILE p;
+				proj->fill_info(&p);
+			
+				msg_pack_start(NETMSGTYPE_SV_EXTRA_PROJECTILE, 0);
+				msg_pack_int(1);
+				for(unsigned i = 0; i < sizeof(NETOBJ_PROJECTILE)/sizeof(int); i++)
+					msg_pack_int(((int *)&p)[i]);
+				msg_pack_end();
+				server_send_msg(-1);
+
+				create_sound(projectilelist[i].pos, SOUND_GRENADE_FIRE);
+				projectilelist[i].tick=server_tick();
+			}
+			else if(projectilelist[i].type==4 && (server_tick()-projectilelist[i].tick) > (server_tickspeed()*projectilelist[i].speed))
+			{
+				new laser(projectilelist[i].pos, projectilelist[i].dir, tuning.laser_reach, get_player(-1));
+				create_sound(projectilelist[i].pos, SOUND_RIFLE_FIRE);
+				projectilelist[i].tick=server_tick();
+			}
+		}
+	}
 	remove_entities();
 }
 
@@ -501,19 +678,24 @@ void projectile::tick()
 	//int collide = col_check_point((int)curpos.x, (int)curpos.y);
 	
 	entity *targetplayer = (entity*)intersect_player(prevpos, curpos, 6.0f, curpos, powner);
-	if(targetplayer || collide || lifespan < 0)
+	if((!config.sv_race_mod && targetplayer) || collide || lifespan < 0)
 	{
 		if (lifespan >= 0 || weapon == WEAPON_GRENADE)
 			create_sound(curpos, sound_impact);
 
 		if (flags & PROJECTILE_FLAGS_EXPLODE)
 			create_explosion(curpos, owner, weapon, false);
-		else if (targetplayer)
+		else if (targetplayer && !config.sv_race_mod)
 		{
 			targetplayer->take_damage(direction * max(0.001f, force), damage, owner, weapon);
 		}
 
 		world->destroy_entity(this);
+	}
+	int z = col_is_teleport((int)curpos.x,curpos.y);
+	if(tele && z && config.sv_teleport_grenade && weapon == WEAPON_GRENADE) {
+		pos = teleport(z);
+		start_tick=server_tick();
 	}
 }
 
@@ -566,7 +748,8 @@ bool laser::hit_player(vec2 from, vec2 to)
 	this->from = from;
 	pos = at;
 	energy = -1;		
-	hit->take_damage(vec2(0,0), tuning.laser_damage, owner->client_id, WEAPON_RIFLE);
+	if(owner != get_player(-1))hit->take_damage(vec2(0,0), tuning.laser_damage, owner->client_id, WEAPON_RIFLE);
+	else hit->take_damage(vec2(0,0), tuning.laser_damage, -1, WEAPON_RIFLE);;
 	return true;
 }
 
@@ -682,7 +865,8 @@ void player::reset()
 	emote_stop = -1;
 	
 	//direction = vec2(0.0f, 1.0f);
-	score = 0;
+	if(config.sv_race_mod)score = -9999;
+	else score=0;
 	dead = true;
 	clear_flag(entity::FLAG_PHYSICS);
 	spawning = false;
@@ -707,6 +891,8 @@ void player::reset()
 	active_weapon = WEAPON_GUN;
 	last_weapon = WEAPON_HAMMER;
 	queued_weapon = -1;
+	ninjatime=-1;
+	ninjateleport=-1;
 }
 
 void player::destroy() {  }
@@ -761,7 +947,13 @@ void player::set_team(int new_team)
 	
 	die(client_id, -1);
 	team = new_team;
-	score = 0;
+	started=0;
+	if(server_tick()-changedteam_time < server_tickspeed()*5)
+		spamteam++;
+	else if(spamteam > 0) spamteam--;
+	if(spamteam == 5)server_ban(client_id,15);
+	changedteam_time=server_tick();
+	if(!config.sv_race_mod)score=0;
 	dbg_msg("game", "team_join player='%d:%s' team=%d", client_id, server_clientname(client_id), team);
 	
 	gameobj->on_player_info_change(&players[client_id]);
@@ -921,18 +1113,33 @@ void player::try_respawn()
 
 	// init weapons
 	mem_zero(&weapons, sizeof(weapons));
-	weapons[WEAPON_HAMMER].got = true;
-	weapons[WEAPON_HAMMER].ammo = -1;
-	weapons[WEAPON_GUN].got = true;
-	weapons[WEAPON_GUN].ammo = data->weapons[WEAPON_GUN].maxammo;
+	if(!config.sv_ninja_mod)
+	{
+		for(int i=0;i<5;i++) {
+			if(start[i]) {
+				weapons[i].got = true;
+				if (i == 0)weapons[i].ammo = -1;
+				else weapons[i].ammo = data->weapons[i].maxammo;
+			} else {
+				weapons[i].got = false;
+				weapons[i].ammo = 0;
+			}
+		}
 
-	/*weapons[WEAPON_RIFLE].got = true;
-	weapons[WEAPON_RIFLE].ammo = -1;*/
+		/*weapons[WEAPON_RIFLE].got = true;
+		weapons[WEAPON_RIFLE].ammo = -1;*/
 	
-	active_weapon = WEAPON_GUN;
-	last_weapon = WEAPON_HAMMER;
-	queued_weapon = 0;
-
+		active_weapon = WEAPON_GUN;
+		last_weapon = WEAPON_HAMMER;
+		queued_weapon = 0;
+	}
+	else 
+	{
+		weapons[WEAPON_NINJA].got = true;
+		active_weapon = WEAPON_NINJA;
+		last_weapon = WEAPON_NINJA;
+		queued_weapon = 0;
+	}
 	reload_timer = 0;
 
 	// Create sound and spawn effects
@@ -940,6 +1147,8 @@ void player::try_respawn()
 	create_playerspawn(pos);
 
 	gameobj->on_player_spawn(this);
+	lastplayer=-1;
+	lastplayertime=-1;
 }
 
 bool player::is_grounded()
@@ -951,12 +1160,60 @@ bool player::is_grounded()
 	return false;
 }
 
+int checkdir(vec2 pos,vec2 pos2)
+{
+	float distance_fovmax;
+	float distance_fovmin;
+	float angleMouse = get_angle(pos);
+	float angleAd = get_angle(pos2);
+	if(angleMouse < 0)angleMouse = (2*pi+angleMouse);
+	if(angleAd < 0)angleAd = (2*pi+angleAd);
+	distance_fovmax=(angleMouse*180/pi)+config.sv_ninja_fov/2;
+	distance_fovmin=(angleMouse*180/pi)-config.sv_ninja_fov/2;
+	if (distance_fovmax < 0)distance_fovmax = 360 + distance_fovmax;
+	if (distance_fovmin < 0)distance_fovmin = 360 + distance_fovmin;
+	distance_fovmin=(int)distance_fovmin%360;
+	distance_fovmax=(int)distance_fovmax%360;
+	if (config.sv_ninja_fov >= 180 && distance_fovmax <= 180)distance_fovmax = 180 + distance_fovmax;
+	if (angleAd*180/pi >= 0 && angleAd*180/pi < config.sv_ninja_fov && 360-distance_fovmin < config.sv_ninja_fov)
+	{
+		distance_fovmin=0;	
+	}
+	else if (angleAd*180/pi > 360-config.sv_ninja_fov && distance_fovmax < distance_fovmin)
+	{
+		distance_fovmax=359;	
+	}
+	//dbg_msg("Testing","Mouse:%f Adversaire:%f fov:%d %d",angleMouse*180/pi,angleAd*180/pi,(int)distance_fovmin,(int)distance_fovmax);
+	if (angleAd*180/pi <= distance_fovmax && angleAd*180/pi >= distance_fovmin) return 1;
+	else return 0;
+}
+
+bool col_intersect_lineplayer(vec2 pos0, vec2 pos1,int clientid, vec2 *out)
+{
+	float d = distance(pos0, pos1);
+	
+	for(float f = 0; f < d; f++)
+	{	
+		for(int i=0;i< MAX_CLIENTS;i++){
+		float a = f/d;
+		vec2 pos = mix(pos0, pos1, a);
+		if((players[i].pos == pos && players[i].client_id != -1 && players[i].client_id != clientid) || col_is_solid((int)pos.x, (int)pos.y))
+		{
+			if(out)
+				*out = pos;
+			return true;
+		}}
+	}
+	if(out)
+		*out = pos1;
+	return false;
+}
 
 int player::handle_ninja()
 {
 	vec2 direction = normalize(vec2(latest_input.target_x, latest_input.target_y));
 
-	if ((server_tick() - ninja.activationtick) > (data->weapons[WEAPON_NINJA].duration * server_tickspeed() / 1000))
+	if ((server_tick() - ninja.activationtick) > (data->weapons[WEAPON_NINJA].duration * server_tickspeed() / 1000) && !config.sv_ninja_mod)
 	{
 		// time's up, return
 		weapons[WEAPON_NINJA].got = false;
@@ -971,7 +1228,7 @@ int player::handle_ninja()
 	set_weapon(WEAPON_NINJA);
 
 	// Check if it should activate
-	if (count_input(latest_previnput.fire, latest_input.fire).presses && (server_tick() > ninja.currentcooldown))
+	if (count_input(latest_previnput.fire, latest_input.fire).presses && (server_tick() > ninja.currentcooldown) && !config.sv_ninja_mod)
 	{
 		// ok then, activate ninja
 		attack_tick = server_tick();
@@ -988,7 +1245,62 @@ int player::handle_ninja()
 		//release_hooked();
 		//release_hooks();
 	}
+	else if(latest_input.fire&1 && config.sv_ninja_mod || config.sv_ninja_auto && config.sv_ninja_mod)
+	{
+		// ok then, activate ninja
+		attack_tick = server_tick();
+		ninja.activationdir = direction;
+		ninja.currentcooldown = data->weapons[WEAPON_NINJA].firedelay * server_tickspeed() / 1000 + server_tick();
+		ninja.currentmovetime = data->weapons[WEAPON_NINJA].movetime * server_tickspeed() / 1000;
+		
+		// reset hit objects
+		numobjectshit = 0;
 
+		//create_sound(pos, SOUND_NINJA_FIRE);
+
+		// release all hooks when ninja is activated
+		//release_hooked();
+		//release_hooks();
+	}
+	if(count_input(latest_previnput.fire, latest_input.fire).presses && config.sv_ninja_auto && config.sv_ninja_mod && config.sv_ninja_fire && server_tick()-ninjatime > server_tickspeed()/2)
+	{
+		vec2 direction = normalize(vec2(latest_input.target_x, latest_input.target_y));
+		vec2 projectile_startpos = pos+direction*phys_size*0.75f;
+		projectile *proj = new projectile(WEAPON_GUN,
+			client_id,
+			projectile_startpos,
+			direction,
+			(int)(server_tickspeed()*tuning.gun_lifetime),
+			this,
+			5, 0, 0, -1, WEAPON_GUN);
+			
+		// pack the projectile and send it to the client directly
+		NETOBJ_PROJECTILE p;
+		proj->fill_info(&p);
+		
+		msg_pack_start(NETMSGTYPE_SV_EXTRA_PROJECTILE, 0);
+		msg_pack_int(1);
+		for(unsigned i = 0; i < sizeof(NETOBJ_PROJECTILE)/sizeof(int); i++)
+			msg_pack_int(((int *)&p)[i]);
+		msg_pack_end();
+		server_send_msg(client_id);
+						
+		create_sound(pos, SOUND_GUN_FIRE);
+		ninjatime = server_tick();
+	}
+	if(count_input(latest_previnput.hook, latest_input.hook).presses && config.sv_ninja_auto && config.sv_ninja_teleport && config.sv_ninja_mod && server_tick()-ninjateleport > server_tickspeed()/2)
+	{
+		core.hooked_player = -1;
+		core.hook_state = HOOK_RETRACTED;
+		core.triggered_events |= COREEVENT_HOOK_RETRACT;
+		core.hook_state = HOOK_RETRACTED;
+		vec2 tmppos;
+		int collide = col_intersect_lineplayer(core.pos, core.pos+(direction*500),client_id, &tmppos);
+		if(!collide)core.pos = core.pos+(direction*500);
+		else core.pos=tmppos-(direction*50);
+		core.hook_pos = core.pos;
+		ninjateleport = server_tick();
+	}
 	ninja.currentmovetime--;
 
 	if (ninja.currentmovetime == 0)
@@ -1001,7 +1313,8 @@ int player::handle_ninja()
 	if (ninja.currentmovetime > 0)
 	{
 		// Set player velocity
-		core.vel = ninja.activationdir * data->weapons[WEAPON_NINJA].velocity;
+		if(config.sv_ninja_mod)core.vel = ninja.activationdir * config.sv_ninja_speed;
+		else core.vel = ninja.activationdir * data->weapons[WEAPON_NINJA].velocity;
 		vec2 oldpos = pos;
 		move_box(&core.pos, &core.vel, vec2(phys_size, phys_size), 0.0f);
 		// reset velocity so the client doesn't predict stuff
@@ -1013,7 +1326,7 @@ int player::handle_ninja()
 
 		// check if we hit anything along the way
 		{
-			int type = NETOBJTYPE_PLAYER_CHARACTER;
+			int type = NETOBJTYPE_PLAYER_CHARACTER,a=0;
 			entity *ents[64];
 			vec2 dir = pos - oldpos;
 			float radius = phys_size * 2.0f; //length(dir * 0.5f);
@@ -1036,7 +1349,8 @@ int player::handle_ninja()
 					continue;
 
 				// check so we are sufficiently close
-				if (distance(ents[i]->pos, pos) > (phys_size * 2.0f))
+				a=checkdir(direction,ents[i]->pos-pos);
+				if (distance(ents[i]->pos, pos) > (phys_size * 2.0f) || !a)
 					continue;
 
 				// hit a player, give him damage and stuffs...
@@ -1149,8 +1463,9 @@ void player::fire_weapon()
 			create_sound(pos, SOUND_HAMMER_FIRE);
 			
 			int type = NETOBJTYPE_PLAYER_CHARACTER;
+			int num = -1;
 			entity *ents[64];
-			int num = world->find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, ents, 64, &type, 1);			
+			if(!config.sv_race_mod)num = world->find_entities(pos+direction*phys_size*0.75f, phys_size*0.5f, ents, 64, &type, 1);			
 
 			for (int i = 0; i < num; i++)
 			{
@@ -1267,7 +1582,7 @@ void player::fire_weapon()
 		
 	}
 
-	if(weapons[active_weapon].ammo > 0) // -1 == unlimited
+	if(weapons[active_weapon].ammo > 0 && !config.sv_infinite_ammo) // -1 == unlimited
 		weapons[active_weapon].ammo--;
 	attack_tick = server_tick();
 	reload_timer = data->weapons[active_weapon].firedelay * server_tickspeed() / 1000;
@@ -1422,10 +1737,87 @@ void player::tick()
 	//core.jumped = jumped;
 	core.input = input;
 	core.tick();
+	if (players[client_id].started && server_tick()-players[client_id].refreshtime > server_tickspeed() && config.sv_race_mod)
+	{
+	char buf[128];
+	int time=(server_tick()-players[client_id].starttime)/server_tickspeed();
+	sprintf(buf,"Current time: %d min %d seconde",time/60,(time%60));
+	send_broadcast(buf, client_id);
+	players[client_id].refreshtime=server_tick();
+	}
 
 	// handle weapons
 	handle_weapons();
-
+	if(regn && (server_tick()%regn)==0) {
+		if(health<10) {
+			health++;
+		} else if(armor<10) {
+			armor++;
+		}
+	}
+	if(col_is_damage((int)core.pos.x,core.pos.y)) {
+		if(lastplayer != -1 && config.sv_suicide_killer && server_tick()-lastplayertime < server_tickspeed()*5){die(lastplayer,-1);score--;}
+		else die(client_id,-1);
+	}
+	else if(col_is_begin((int)core.pos.x,core.pos.y)) {
+		players[client_id].starttime=server_tick();
+		players[client_id].ended=0;
+		players[client_id].started=1;
+		players[client_id].refreshtime=server_tick();
+	}
+	else if(col_is_end((int)core.pos.x,core.pos.y) && !players[client_id].ended && players[client_id].started) {
+		float time=((float)(server_tick()-players[client_id].starttime))/((float) server_tickspeed());
+		char buf[128];
+		sprintf(buf,"%s finished in: %d min %d seconde",server_clientname(client_id),(int) time/60,((int)time%60));
+		send_chat(-1,CHAT_ALL, buf);
+		int ttime = 0 - (int) time;
+		players[client_id].ended=1;
+		players[client_id].started=0;
+		if (players[client_id].score < ttime)players[client_id].score=ttime;
+		top5_parsePlayer(server_clientname(client_id),(float) time);
+	}
+	int z = col_is_teleport((int)core.pos.x,core.pos.y);
+	if(tele && z) {
+		core.hooked_player = -1;
+		core.hook_state = HOOK_RETRACTED;
+		core.triggered_events |= COREEVENT_HOOK_RETRACT;
+		core.hook_state = HOOK_RETRACTED;
+		core.pos = teleport(z);
+		core.hook_pos = core.pos;
+		player* cplayer = closest_player(core.pos, 20.0f, this);
+		if(cplayer && cplayer->client_id != -1 && config.sv_teleport_kill){
+			cplayer->die(client_id,-1);
+		dbg_msg("Rajh","%s sest teleporter sur : %s",server_clientname(client_id),server_clientname(cplayer->client_id));}
+		if(strip) {
+			active_weapon = WEAPON_HAMMER;
+			last_weapon = WEAPON_HAMMER;
+			if(z&1) {
+				weapons[0].got = true;
+				for(int i=1;i<5;i++) {
+					weapons[i].got = false;
+				}
+			} else {
+				for(int i=0;i<5;i++) {
+					if(start[i]) {
+						weapons[i].got = true;
+						weapons[i].ammo = data->weapons[i].maxammo;
+					} else {
+						weapons[i].got = false;
+						weapons[i].ammo = 0;
+					}
+				}
+			}
+		}
+	}
+	if((core.hook_state==HOOK_FLYING || core.hook_state==HOOK_GRABBED) && col_intersect_nohook(core.pos,core.hook_pos)) {
+		core.hooked_player = -1;
+		core.hook_state = HOOK_RETRACTED;
+		core.triggered_events |= COREEVENT_HOOK_RETRACT;
+		core.hook_state = HOOK_RETRACTED;
+		core.hook_pos = core.pos;
+		core.hook_tick = 0;
+	}
+	if (core.hooked_player != -1){players[core.hooked_player].lastplayer=client_id;players[core.hooked_player].lastplayertime=server_tick();}
 	player_state = input.player_state;
 
 	// Previnput
@@ -1521,7 +1913,7 @@ void player::die(int killer, int weapon)
 
 bool player::take_damage(vec2 force, int dmg, int from, int weapon)
 {
-	core.vel += force;
+	if(!config.sv_race_mod || (config.sv_race_mod && from == client_id))core.vel += force;
 	
 	if(gameobj->is_friendly_fire(client_id, from) && !config.sv_teamdamage)
 		return false;
@@ -1529,6 +1921,7 @@ bool player::take_damage(vec2 force, int dmg, int from, int weapon)
 	// player only inflicts half damage on self
 	if(from == client_id)
 		dmg = max(1, dmg/2);
+	if(from == client_id && !config.sv_rocket_jump_damage)dmg=0;
 
 	// CTF and TDM (TODO: check for FF)
 	//if (gameobj->gametype != GAMETYPE_DM && from >= 0 && players[from].team == team)
@@ -1571,6 +1964,8 @@ bool player::take_damage(vec2 force, int dmg, int from, int weapon)
 		}
 		
 		health -= dmg;
+		lastplayer=from;
+		lastplayertime=server_tick();
 	}
 
 	damage_taken_tick = server_tick();
@@ -1690,10 +2085,11 @@ powerup::powerup(int _type, int _subtype)
 	subtype = _subtype;
 	proximity_radius = phys_size;
 
-	reset();
+	if(!config.sv_ninja_mod)
+	{reset();
 
 	// TODO: should this be done here?
-	world->insert_entity(this);
+	world->insert_entity(this);}
 }
 
 void powerup::reset()
@@ -1806,7 +2202,7 @@ void powerup::tick()
 		{
 			dbg_msg("game", "pickup player='%d:%s' item=%d/%d",
 				pplayer->client_id, server_clientname(pplayer->client_id), type, subtype);
-			spawntick = server_tick() + server_tickspeed() * respawntime;
+			spawntick = server_tick() + server_tickspeed() * respawntime * config.sv_powerup_respawn;
 		}
 	}
 }
@@ -2012,6 +2408,35 @@ void mods_tick()
 
 	if(world->paused) // make sure that the game object always updates
 		gameobj->tick();
+	if(config.sv_regen>=0) {
+		char buf[128];
+		regn = config.sv_regen;
+		if(regn>0) {
+			sprintf(buf,"Tee's regenerate health at %.2f health/sec",50.0/(float)regn);
+		} else {
+			sprintf(buf,"Tee's no longer regenerate health.");
+		}
+		send_chat(-1,-2,buf);
+		config.sv_regen = -1;}
+	else if(config.sv_teleport) {
+		tele = tele?0:1;
+		char buf[128];
+		tele?sprintf(buf,"Teleport tiles will teleport tee's."):sprintf(buf,"Teleport tiles will no longer teleport tee's.");
+		send_chat(-1,-2,buf);
+		config.sv_teleport = 0;}
+	else if(config.sv_strip) {
+		strip = strip?0:1;
+		char buf[128];
+		strip?sprintf(buf,"Tee's will have weapons removed on teleport."):sprintf(buf,"Tee's will not lose weapons on teleport.");
+		send_chat(-1,-2,buf);
+		config.sv_strip = 0;
+	}
+	 else if(config.sv_start[0]!=0) {
+		sscanf(config.sv_start,"%d %d %d %d %d",&(start[0]),&(start[1]),&(start[2]),&(start[3]),&start[4]);
+		char buf[128];
+		sprintf(buf,"%s%s%s%s%senabled on spawn!",start[0]?"Hammer ":"",start[1]?"Pistol ":"",start[2]?"Shotgun ":"",start[3]?"Grenade ":"",start[4]?"Rifle ":"");
+		send_chat(-1,-2,buf);
+		config.sv_start[0] = 0;}
 }
 
 void mods_snap(int client_id)
@@ -2057,7 +2482,12 @@ void mods_client_enter(int client_id)
 	players[client_id].respawn();
 	dbg_msg("game", "join player='%d:%s'", client_id, server_clientname(client_id));
 
-
+	if(config.sv_race_mod)players[client_id].score=-9999;
+	else players[client_id].score=0;
+	players[client_id].started=0;
+	players[client_id].votedfor=-1;
+	players[client_id].changedteam_time=-1;
+	players[client_id].spamteam=0;
 	char buf[512];
 	str_format(buf, sizeof(buf), "%s entered and joined the %s", server_clientname(client_id), get_team_name(players[client_id].team));
 	send_chat(-1, CHAT_ALL, buf); 
@@ -2090,11 +2520,44 @@ void mods_client_drop(int client_id)
 	send_chat(-1, CHAT_ALL, buf);
 
 	dbg_msg("game", "leave player='%d:%s'", client_id, server_clientname(client_id));
-
 	gameobj->on_player_death(&players[client_id], 0, -1);
 	world->remove_entity(&players[client_id]);
 	world->core.players[client_id] = 0x0;
 	players[client_id].client_id = -1;
+}
+
+void top5_draw(int id) {
+        int pos=1;
+	char buf[512];
+        send_chat(-1,CHAT_ALL,"----------- Top 5 -----------");
+        for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end() && pos<=5; i++) {
+                std::ostringstream oss;
+                oss << pos << ". " << i->name() << " Time:" << (int)(i->score())/60 << " minutes " << i->score()-((int)i->score()/60)*60 <<" secondes.";
+                send_chat(-1, CHAT_ALL, oss.str().c_str());
+                pos++;
+        }
+	str_format(buf, sizeof(buf), "-----------------------------(%s)",server_clientname(id));
+	send_chat(-1, CHAT_ALL, buf);
+}
+
+void rank_draw(int id) {
+        int pos=1;;
+	float found=-1;
+	char buf[512];
+        for (std::list<player_score>::iterator i=top5.begin(); i!=top5.end(); i++) {
+		if(!strcmp(i->name().c_str(),server_clientname(id))){found=i->score();break;}
+                pos++;
+        }
+	if(found != -1){
+	str_format(buf, sizeof(buf), "%s Rank: %d Time:%d minutes %f secondes",server_clientname(id),pos,(int)found/60,found-((int)found/60)*60,config.sv_rank_site);
+	send_chat(-1, CHAT_ALL, buf);
+	str_format(buf, sizeof(buf), "See all rank at %s",config.sv_rank_site);
+	send_chat(-1, CHAT_ALL, buf);
+	}
+	else{
+	str_format(buf, sizeof(buf), "%s is not ranked",server_clientname(id));
+	send_chat(-1, CHAT_ALL, buf);
+	}
 }
 
 void mods_message(int msgtype, int client_id)
@@ -2118,11 +2581,113 @@ void mods_message(int msgtype, int client_id)
 		if(config.sv_spamprotection && players[client_id].last_chat+time_freq() > time_get())
 		{
 			// consider this as spam
+			if(!strcasecmp(msg->message, ".info") || !strcasecmp(msg->message, ".mods") || !strcasecmp(msg->message, "/top5") || !strcasecmp(msg->message, "/rank"))
+			players[client_id].last_chat = time_get()+time_freq()*10;
+			else players[client_id].last_chat = time_get();
 		}
 		else
 		{
-			players[client_id].last_chat = time_get();
-			send_chat(client_id, team, msg->message);
+			if(!strcasecmp(msg->message, ".info"))
+			{
+				char buf[128];
+				str_format(buf, sizeof(buf), "Mod for ubuntu version -1.7 join ThePuMa@irc.freenode.org (say .mods). (C)Rajh(%s)",server_clientname(client_id));
+				send_chat(-1,CHAT_ALL,buf);
+				players[client_id].last_chat = time_get()+time_freq()*10;
+			}
+			else if(!strcasecmp(msg->message, ".mods"))
+			{
+				char buf[128];
+				str_format(buf, sizeof(buf), "Mod used : Homing fun (C)ShootMe | Kick/ban (C)GregWar (%s)",server_clientname(client_id));
+				send_chat(-1,CHAT_ALL,buf);
+				players[client_id].last_chat = time_get()+time_freq()*10;
+			}
+			else if(!strcasecmp(msg->message, "/top5") && config.sv_race_mod)
+			{
+				top5_draw(client_id);
+				players[client_id].last_chat = time_get()+time_freq()*10;
+			}
+			else if(!strcasecmp(msg->message, "/rank") && config.sv_race_mod)
+			{
+				rank_draw(client_id);
+				players[client_id].last_chat = time_get()+time_freq()*10;
+			}
+			/*else if (!strncasecmp(msg->message, "/kickid",7) && !vote_called && config.sv_allow_votes)
+			{
+				int tmpclientid=msg->message[9];
+				if(players[tmpclientid].client_id != -1)
+				{
+					votetime =60;
+					str_format(votetype, sizeof(votetype), "kick");
+					votedtokick=tmpclientid;
+					char buf[512];
+					str_format(buf, sizeof(buf), "||| Vote for: kick %s (say \"/yes\" or \"/no\") |||(%s)", server_clientname(tmpclientid),server_clientname(client_id));
+					send_chat(-1, CHAT_ALL, buf);
+					vote_called=true;
+					timer_vote = server_tick();
+				}
+			}*/
+			else if (!strncasecmp(msg->message, "/kick",5) && !vote_called && config.sv_allow_votes)
+			{
+				int playersnumber=0;
+				int playerstokick=-1;
+				char message[256];
+				for (int i=0; i < MAX_CLIENTS;i++)
+				{
+					if(players[i].client_id !=-1)
+					{
+						str_format(message, sizeof(message), "/kick ");
+						strcat(message,server_clientname(i));
+						if(!strncmp(msg->message, message,9))
+						{
+							playersnumber++;
+							playerstokick=i;
+						}
+					}
+				}
+				if(playersnumber == 1 && playerstokick != -1)
+				{
+					votetime =60;
+					str_format(votetype, sizeof(votetype), "kick");
+					votedtokick=playerstokick;
+					char buf[512];
+					str_format(buf, sizeof(buf), "||| Vote for: kick %s (say \"/yes\" or \"/no\") |||(%s)", server_clientname(playerstokick),server_clientname(client_id));
+					send_chat(-1, CHAT_ALL, buf);
+					vote_called=true;
+					timer_vote = server_tick();
+				}
+				else if(playersnumber > 1)
+				{
+					char buf[512];
+					str_format(buf, sizeof(buf), "||| Several players possible |||(%s)", server_clientname(client_id));
+					send_chat(-1, CHAT_ALL, buf);
+			
+				}
+			}
+			else if (!strncasecmp(msg->message, "/yes",3) && players[client_id].votedfor == -1 && vote_called)
+			{
+				char message[256];
+				str_format(message, sizeof(message), "%s voted for yes",server_clientname(client_id));
+				send_chat(-1,CHAT_ALL,message);
+				players[client_id].votedfor = 1;
+				resultvote();
+			}
+			else if (!strncasecmp(msg->message, "/no",2) && players[client_id].votedfor == -1 && vote_called)
+			{
+				char message[256];
+				str_format(message, sizeof(message), "%s voted for no",server_clientname(client_id));
+				send_chat(-1,CHAT_ALL,message);
+				players[client_id].votedfor = 0;
+				resultvote();
+			}
+			else if (!strncasecmp(msg->message, "/currentvote",2) && vote_called)
+			{
+				resultvote();
+			}
+			else
+			{
+				players[client_id].last_chat = time_get();
+				send_chat(client_id, team, msg->message);
+			}
 		}
 	}
 	else if (msgtype == NETMSGTYPE_CL_SETTEAM)
@@ -2274,16 +2839,120 @@ static void con_set_team(void *result, void *user_data)
 	players[client_id].set_team(team);
 }
 
+static void con_vote(void *result, void *user_data)
+{
+	votetime =console_arg_int(result, 0);
+	char buf[512];
+	str_format(buf, sizeof(buf), "||| Vote for: %s (say \"/yes\" or \"/no\") |||", console_arg_string(result, 1));
+	send_chat(-1, CHAT_ALL, buf);
+	vote_called=true;
+	//if (console_arg_int(result, 0) == 1)
+	timer_vote = server_tick();
+	//else world->timer_vote = -1;
+}
+
+static void con_kill_pl(void *result, void *user_data)
+{
+	players[console_arg_int(result, 0)].die(-1,-1);
+	char buf[512];
+	str_format(buf, sizeof(buf), "%s Killed by admin", server_clientname(console_arg_int(result, 0)));
+	send_chat(-1, CHAT_ALL, buf);
+}
+
+static void con_teleport(void *result, void *user_data)
+{
+	players[console_arg_int(result, 0)].core.pos=players[console_arg_int(result, 1)].core.pos;
+	players[console_arg_int(result, 0)].started=0;
+}
+
+static void con_teleport_to(void *result, void *user_data)
+{
+	players[console_arg_int(result, 0)].core.pos.x=console_arg_int(result, 1);
+	players[console_arg_int(result, 0)].core.pos.y=console_arg_int(result, 2);
+	players[console_arg_int(result, 0)].started=0;
+}
+
+static void con_get_pos(void *result, void *user_data)
+{
+	dbg_msg("Tele","%s pos: %d @ %d", server_clientname(console_arg_int(result, 0)),(int) players[console_arg_int(result, 0)].core.pos.x,(int)players[console_arg_int(result, 0)].core.pos.y);
+
+}
+
+static void con_projectile_add(void *result, void *user_data)
+{
+	vec2 pos_proj,dir_proj;
+	pos_proj.x=console_arg_float(result, 1);
+	pos_proj.y=console_arg_float(result, 2);
+	dir_proj.x=console_arg_float(result, 3);
+	dir_proj.y=console_arg_float(result, 4);
+	for (int i=0;i < num_proj;i++){
+		if(!projectilelist[i].type)
+		{
+			projectilelist[i].pos= pos_proj;
+			projectilelist[i].dir= dir_proj;
+			projectilelist[i].speed= console_arg_float(result, 5);
+			projectilelist[i].tick=server_tick()+server_tickspeed()*console_arg_float(result, 6);
+			break;
+		}
+	}
+}
+
+static void con_projectile_remove(void *result, void *user_data)
+{
+	int i=console_arg_int(result, 0);
+	if (i >= 0 && i <num_proj)
+	projectilelist[i].type=0;
+}
+
+static void con_projectile_remove_all(void *result, void *user_data)
+{
+	for (int i = 0;i <num_proj;i++){
+		projectilelist[i].type=0;
+	}
+}
+
+static void con_projectile_add_auto(void *result, void *user_data)
+{
+	int clientid=console_arg_int(result, 0);
+	if(players[clientid].client_id != -1)
+	{
+		vec2 direction = normalize(vec2(players[clientid].latest_input.target_x, players[clientid].latest_input.target_y));
+	 	vec2 projectile_startpos = players[clientid].pos+direction*players[clientid].phys_size*0.75f;
+		for (int i=0;i < num_proj;i++){
+			if(!projectilelist[i].type)
+			{
+				projectilelist[i].type=console_arg_int(result, 1);
+				if(console_arg_int(result, 1) == 3)projectilelist[i].pos=projectile_startpos;
+				else projectilelist[i].pos=players[clientid].pos;
+				projectilelist[i].dir= direction;
+				projectilelist[i].speed= console_arg_float(result, 2);
+				projectilelist[i].tick=server_tick();
+				dbg_msg("projectile","New projectile type=%d | pos.x = %f | pos.y = %f | dir.x = %f | dir.y = %f | speed = %d",projectilelist[i].type,projectilelist[i].pos.x,projectilelist[i].pos.y,projectilelist[i].dir.x,projectilelist[i].dir.y,projectilelist[i].speed);
+				break;
+			}
+		}
+	}
+}
+
 void mods_console_init()
 {
 	MACRO_REGISTER_COMMAND("tune", "si", con_tune_param, 0);
 	MACRO_REGISTER_COMMAND("tune_reset", "", con_tune_reset, 0);
 	MACRO_REGISTER_COMMAND("tune_dump", "", con_tune_dump, 0);
 
+	MACRO_REGISTER_COMMAND("vote", "ir", con_vote, 0);
+	MACRO_REGISTER_COMMAND("teleport", "ii", con_teleport, 0);
+	MACRO_REGISTER_COMMAND("teleport_to", "iii", con_teleport_to, 0);
+	MACRO_REGISTER_COMMAND("get_pos", "i", con_get_pos, 0);
+	MACRO_REGISTER_COMMAND("kill_pl", "i", con_kill_pl, 0);
 	MACRO_REGISTER_COMMAND("restart", "?i", con_restart, 0);
 	MACRO_REGISTER_COMMAND("broadcast", "r", con_broadcast, 0);
 	MACRO_REGISTER_COMMAND("say", "r", con_say, 0);
 	MACRO_REGISTER_COMMAND("set_team", "ii", con_set_team, 0);
+	MACRO_REGISTER_COMMAND("projectile_add", "iiiiiii", con_projectile_add, 0);
+	MACRO_REGISTER_COMMAND("projectile_add_auto", "iii", con_projectile_add_auto, 0);
+	MACRO_REGISTER_COMMAND("projectile_remove", "i", con_projectile_remove, 0);
+	MACRO_REGISTER_COMMAND("projectile_remove_all", "", con_projectile_remove_all, 0);
 }
 
 void mods_init()
@@ -2339,6 +3008,7 @@ void mods_init()
 				players[MAX_CLIENTS-i-1].team = i&1;
 		}
 	}
+	top5_load();
 }
 
 void mods_shutdown()

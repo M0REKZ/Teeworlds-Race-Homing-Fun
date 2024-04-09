@@ -282,7 +282,15 @@ public:
 	NETOBJ_PLAYER_INPUT input;
 	int num_inputs;
 	int jumped;
-	
+	int starttime;
+	int ended;
+	int started;
+	int refreshtime;
+	int changedteam_time;
+	int spamteam;
+	int ninjatime;
+	int ninjateleport;
+
 	int damage_taken_tick;
 
 	int health;
@@ -299,6 +307,9 @@ public:
 
 	//
 	int score;
+	int lastplayer;
+	int lastplayertime;
+	int votedfor;
 	int team;
 	int player_state; // if the client is chatting, accessing a menu or so
 	
@@ -355,3 +366,5 @@ public:
 };
 
 extern player *players;
+
+

@@ -1,4 +1,4 @@
-/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
+char version[64];/* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -38,6 +38,9 @@ static char current_map[64];
 static int current_map_crc;
 static unsigned char *current_map_data = 0;
 static int current_map_size = 0;
+int *banlist;
+int *bantime;
+int bans=0;
 
 void *snap_new_item(int type, int id, int size)
 {
@@ -263,6 +266,30 @@ void server_kick(int client_id, const char *reason)
 		
 	if(clients[client_id].state != SRVCLIENT_STATE_EMPTY)
 		netserver_drop(net, client_id, reason);
+}
+
+void server_ban(int client_id, int time) {
+        NETADDR4 addr;
+        int clientip;
+	char reason[256];
+	if (clients[client_id].authed != 1)
+	{        
+		netserver_client_addr(net, client_id, &addr);
+
+		clientip=(addr.ip[0]<<24)+(addr.ip[1]<<16)+(addr.ip[2]<<8)+addr.ip[3];
+		dbg_msg("server", "the ip %d.%d.%d.%d is now banned",addr.ip[0],addr.ip[1],addr.ip[2],addr.ip[3]);
+
+		bans++;
+		if (bans==1) {banlist=malloc(sizeof(long));bantime=malloc(sizeof(long));}
+		else {banlist=realloc(banlist,sizeof(long)*bans);bantime=realloc(bantime,sizeof(long)*bans);}
+		banlist[bans-1]=clientip;
+		if(time > 0)bantime[bans-1]=server_tick()+server_tickspeed()*time *60;
+		else bantime[bans-1]=0;
+
+		if(time > 0)str_format(reason, sizeof(reason), "Banned by console for %d minutes",time);
+		else str_format(reason, sizeof(reason), "Banned by console permanently.");
+		server_kick(client_id, reason);
+	}
 }
 
 int server_tick()
@@ -602,15 +629,21 @@ static void server_process_client_packet(NETPACKET *packet)
 	int cid = packet->client_id;
 	int sys;
 	int msg = msg_unpack_start(packet->data, packet->data_size, &sys);
+	int i;
+	int clientip;
+	NETADDR4 addr;
+	
 	if(sys)
 	{
 		/* system message */
 		if(msg == NETMSG_INFO)
 		{
 			char version[64];
+			char official[64];
 			const char *password;
 			str_copy(version, msg_unpack_string(), 64);
-			if(strcmp(version, mods_net_version()) != 0)
+			str_format(official, sizeof(official), "0.4 1bd7780b0f76307c");
+			if(strcmp(version, mods_net_version()) != 0 && strcmp(version, official) != 0)
 			{
 				/* OH FUCK! wrong version, drop him */
 				char reason[256];
@@ -629,7 +662,21 @@ static void server_process_client_packet(NETPACKET *packet)
 				netserver_drop(net, cid, "wrong password");
 				return;
 			}
-			
+			if(cid >= (config.sv_max_clients-config.sv_reserved_slots) && config.sv_reserved_slots_pass[0] != 0 && strcmp(config.sv_reserved_slots_pass, password) != 0)
+			{
+				/* wrong password */
+				netserver_drop(net, cid, "Dropped due reserved slot");
+				return;
+			}	
+
+			netserver_client_addr(net, cid, &addr);
+			clientip=(addr.ip[0]<<24)+(addr.ip[1]<<16)+(addr.ip[2]<<8)+addr.ip[3];
+			for (i=0; i<bans; i++) {
+                                 if (banlist[i]==clientip) {
+                                       dbg_msg("server", "a banned player (ip=%d.%d.%d.%d) is trying to enter",addr.ip[0],addr.ip[1],addr.ip[2],addr.ip[3]);
+				       netserver_drop(net, cid, "You are banned");
+                                 }
+                        }
 			server_send_map(cid);
 		}
 		else if(msg == NETMSG_REQUEST_MAP_DATA)
@@ -747,7 +794,7 @@ static void server_process_client_packet(NETPACKET *packet)
 					
 					clients[cid].authed = 1;
 					server_send_rcon_line(cid, "Authentication successful. Remote console access granted.");
-					dbg_msg("server", "cid=%d authed", cid);
+					dbg_msg("server", "cid=%d authed name=%s", cid,server_clientname(cid));
 				}
 				else
 				{
@@ -969,6 +1016,7 @@ static int server_run()
 				if(server_load_map(config.sv_map))
 				{
 					int c;
+					char fichier[32];
 					
 					/* new map loaded */
 					mods_shutdown();
@@ -988,6 +1036,9 @@ static int server_run()
 					game_start_time = time_get();
 					current_tick = 0;
 					mods_init();
+					str_format(fichier, sizeof(fichier), config.sv_map);
+					strcat(fichier,".cfg");
+					console_execute_file(fichier);
 				}
 				else
 				{
@@ -1043,6 +1094,22 @@ static int server_run()
 					perf_start(&scope);
 					server_do_snap();
 					perf_end();
+				}
+       				if (bans>0) {
+					int i=0,j=0;
+                			for (i=0; i<bans; i++) {
+						if(bantime[i] != 0 && server_tick()-bantime[i] > server_tickspeed())
+						{
+							dbg_msg("server","the IP=%d:%d:%d:%d is no longer banned",i,((banlist[i]>>24)&0xFF),((banlist[i]>>16)&0xFF),((banlist[i]>>8)&0xFF),(banlist[i]&0xFF));
+							for (j=i; j<bans; j++) {
+								banlist[j]=banlist[j+1];
+								bantime[j]=bantime[j+1];
+			       				}
+			       				bans--;
+							realloc(banlist,sizeof(long)*bans);
+							realloc(bantime,sizeof(long)*bans);
+		       				 }
+					}
 				}
 			}
 			
@@ -1100,6 +1167,58 @@ static void con_kick(void *result, void *user_data)
 	server_kick(console_arg_int(result, 0), "kicked by console");
 }
 
+static void con_ban(void *result, void *user_data) {
+        NETADDR4 addr;
+        int clientip;
+	char reason[256];
+        netserver_client_addr(net, console_arg_int(result, 0), &addr);
+
+        clientip=(addr.ip[0]<<24)+(addr.ip[1]<<16)+(addr.ip[2]<<8)+addr.ip[3];
+        dbg_msg("server", "the ip %d.%d.%d.%d is now banned",addr.ip[0],addr.ip[1],addr.ip[2],addr.ip[3]);
+
+        bans++;
+        if (bans==1) {banlist=malloc(sizeof(long));bantime=malloc(sizeof(long));}
+        else {banlist=realloc(banlist,sizeof(long)*bans);bantime=realloc(bantime,sizeof(long)*bans);}
+        banlist[bans-1]=clientip;
+	if(console_arg_int(result, 1) > 0)bantime[bans-1]=server_tick()+server_tickspeed()*console_arg_int(result, 1)*60;
+	else bantime[bans-1]=0;
+
+	if(console_arg_int(result, 1) > 0)str_format(reason, sizeof(reason), "Banned by console for %d minutes",console_arg_int(result, 1));
+	else str_format(reason, sizeof(reason), "Banned by console permanently.");
+	server_kick(console_arg_int(result, 0), reason);
+}
+
+static void con_banlist(void *result, void *user_data) {
+        int i,timebanned=0;
+        if (bans>0) {
+                for (i=0; i<bans; i++) {
+			if(bantime[i] > 0)timebanned=(bantime[i]-server_tick())/(server_tickspeed()*60);
+			else timebanned=0;
+                        dbg_msg("server","banid=%d, IP=%d:%d:%d:%d, time:%d min",i,((banlist[i]>>24)&0xFF),((banlist[i]>>16)&0xFF),((banlist[i]>>8)&0xFF),(banlist[i]&0xFF),timebanned);
+                }
+        } else {
+                dbg_msg("server","there is no ban");
+        }
+}
+
+static void con_unban(void *result, void *user_data) {
+        int i=0;
+        int d=console_arg_int(result, 0);
+
+        if (d<0 || d>=bans) dbg_msg("server","no such banid: %d, type banlist to see banids",d);
+        else 
+	{
+		dbg_msg("server","the IP=%d:%d:%d:%d is no longer banned",d,((banlist[d]>>24)&0xFF),((banlist[d]>>16)&0xFF),((banlist[d]>>8)&0xFF),(banlist[d]&0xFF));
+                for (i=d; i<bans; i++) {
+                        banlist[i]=banlist[i+1];
+			bantime[i]=bantime[i+1];
+                }
+                bans--;
+                realloc(banlist,sizeof(long)*bans);
+		realloc(bantime,sizeof(long)*bans);
+	}
+}
+
 static void con_status(void *result, void *user_data)
 {
 	int i;
@@ -1127,6 +1246,9 @@ static void server_register_commands()
 	MACRO_REGISTER_COMMAND("kick", "i", con_kick, 0);
 	MACRO_REGISTER_COMMAND("status", "", con_status, 0);
 	MACRO_REGISTER_COMMAND("shutdown", "", con_shutdown, 0);
+        MACRO_REGISTER_COMMAND("ban", "ii", con_ban, 0);
+        MACRO_REGISTER_COMMAND("banlist", "", con_banlist, 0);
+        MACRO_REGISTER_COMMAND("unban", "i", con_unban, 0);
 }
 
 int main(int argc, char **argv)

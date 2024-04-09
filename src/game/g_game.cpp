@@ -1,6 +1,7 @@
 /* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
 #include <string.h>
 #include "g_game.h"
+#include <engine/e_config.h>
 
 const char *tuning_params::names[] =
 {
@@ -271,6 +272,8 @@ void player_core::tick()
 				going_to_hit_ground = true;
 
 			// Check against other players first
+			if(!config.sv_race_mod)
+			{			
 			for(int i = 0; i < MAX_CLIENTS; i++)
 			{
 				player_core *p = world->players[i];
@@ -285,6 +288,7 @@ void player_core::tick()
 					hooked_player = i;
 					break;
 				}
+			}
 			}
 			
 			if(hook_state == HOOK_FLYING)
@@ -371,12 +375,15 @@ void player_core::tick()
 				continue;
 			
 			//player *p = (player*)ent;
-			if(p == this) // || !(p->flags&FLAG_ALIVE)
-				continue; // make sure that we don't nudge our self
-			
+				if(p == this) // || !(p->flags&FLAG_ALIVE)
+					continue; // make sure that we don't nudge our self
+
 			// handle player <-> player collision
 			float d = distance(pos, p->pos);
 			vec2 dir = normalize(pos - p->pos);
+			
+			if(!config.sv_race_mod)
+			{
 			if(d < phys_size*1.25f && d > 1.0f)
 			{
 				float a = (phys_size*1.45f - d);
@@ -388,7 +395,6 @@ void player_core::tick()
 				vel = vel + dir*a*(v*0.75f);
 				vel = vel * 0.85f;
 			}
-			
 			// handle hook influence
 			if(hooked_player == i)
 			{
@@ -405,6 +411,7 @@ void player_core::tick()
 					vel.x = saturated_add(-drag_speed, drag_speed, vel.x, -accel*dir.x*0.25f);
 					vel.y = saturated_add(-drag_speed, drag_speed, vel.y, -accel*dir.y*0.25f);
 				}
+			}
 			}
 		}
 	}	

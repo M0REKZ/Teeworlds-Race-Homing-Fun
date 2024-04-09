@@ -106,7 +106,7 @@ void server_setbrowseinfo(int game_type, int progression);
 		<other_func>
 */
 void server_kick(int client_id, const char *reason);
-
+void server_ban(int client_id, int time);
 /*
 	Function: server_tick
 		TODO

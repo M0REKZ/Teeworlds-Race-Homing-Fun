@@ -1,6 +1,7 @@
 /* copyright (c) 2007 magnus auvinen, see licence.txt for more info */
 #include <engine/e_server_interface.h>
 #include <game/g_mapitems.h>
+#include <engine/e_config.h>
 #include "gs_common.h"
 #include "gs_game_ctf.h"
 
@@ -86,7 +87,7 @@ void gameobject_ctf::tick()
 				{
 					// CAPTURE! \o/
 					teamscore[fi^1] += 100;
-					f->carrying_player->score += 5;
+					if(!config.sv_race_mod)f->carrying_player->score += 5;
 
 					dbg_msg("game", "flag_capture player='%d:%s'", f->carrying_player->client_id, server_clientname(f->carrying_player->client_id));
 
@@ -110,7 +111,7 @@ void gameobject_ctf::tick()
 					if(!f->at_stand)
 					{
 						player *p = close_players[i];
-						p->score += 1;
+						if(!config.sv_race_mod)p->score += 1;
 
 						dbg_msg("game", "flag_return player='%d:%s'", p->client_id, server_clientname(p->client_id));
 
@@ -125,7 +126,7 @@ void gameobject_ctf::tick()
 						teamscore[fi^1]++;
 					f->at_stand = 0;
 					f->carrying_player = close_players[i];
-					f->carrying_player->score += 1;
+					if(!config.sv_race_mod)f->carrying_player->score += 1;
 
 					dbg_msg("game", "flag_grab player='%d:%s'", f->carrying_player->client_id, server_clientname(f->carrying_player->client_id));
 					
@@ -145,7 +146,7 @@ void gameobject_ctf::tick()
 			
 			if(!f->carrying_player && !f->at_stand)
 			{
-				if(server_tick() > f->drop_tick + server_tickspeed()*30)
+				if(server_tick() > f->drop_tick + server_tickspeed()*30 || col_is_damage(f->pos.x, f->pos.y))
 				{
 					create_sound_global(SOUND_CTF_RETURN);
 					f->reset();
